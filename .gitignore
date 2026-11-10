@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Test artifacts (smoke-test screenshots, coverage)
+test-results/
+coverage/
+
+# Environment & secrets (API keys for the AI proxy will live here, never commit them)
+.env
+.env.*
+!.env.example
+.dev.vars
+.wrangler/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Local Claude Code settings (shared settings in .claude/settings.json are fine to commit)
+.claude/settings.local.json

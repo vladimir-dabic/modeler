@@ -1,0 +1,27 @@
+{
+  "name": "modeler",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "description": "Simple SketchUp-style 3D modeler for 3D printing and woodworking",
+  "dependencies": {
+    "three": "^0.187.0",
+    "three-bvh-csg": "^0.0.18",
+    "three-mesh-bvh": "^0.9.18"
+  },
+  "devDependencies": {
+    "@types/three": "^0.187.0",
+    "playwright-core": "^1.65.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.7",
+    "vitest": "^5.1.0"
+  },
+  "private": true,
+  "type": "module"
+}
