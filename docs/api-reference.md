@@ -43,13 +43,17 @@ All lengths are millimetres, angles degrees, world Z-up. Write operations return
 | [`open_file`](#open_file) | needs a host capability (async) |
 | [`save_file`](#save_file) | needs a host capability (async) |
 | [`export_stl`](#export_stl) | needs a host capability (async) |
+| [`import_dxf`](#import_dxf) | needs a host capability (async) |
+| [`get_reference`](#get_reference) | read (no change) |
+| [`update_reference`](#update_reference) | write (one undo step) |
+| [`delete_reference`](#delete_reference) | write (one undo step) |
 | [`apply_operations`](#apply_operations) | write (one undo step) |
 
 ## get_scene
 
 *read (no change)*
 
-Overview of the model: workspace, printer, overall bounds and the parts. detail "outline" lists each top-level group as one line (best first call on big models), "compact" (default) one line per part, "full" complete JSON. Lines read: id "name" shape size at x,y,z [hole] in "group".
+Overview of the model: workspace, printer, overall bounds, the parts and any reference drawings (imported plans to build on; not parts). detail "outline" lists each top-level group as one line (best first call on big models), "compact" (default) one line per part, "full" complete JSON. Lines read: id "name" shape size at x,y,z [hole] in "group".
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -449,6 +453,60 @@ Write a binary STL (mm) of the visible solids, with holes cut, for 3D printing. 
 |---|---|---|---|
 | `path` | string | yes | Must end in .stl |
 | `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } |  | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
+
+## import_dxf
+
+*needs a host capability (async)*
+
+Import a DXF drawing (e.g. a floor plan) as a reference drawing: lines on the ground (or at position) to build on and snap to. It is not part of the model (no cut list, export or holes). Give path (MCP: relative to the working folder) or text (the file contents). Units come from the file, else units, else mm. DWG is not supported: save as DXF first.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `path` | string |  | A .dxf file |
+| `text` | string |  | DXF contents (the app passes the picked file) |
+| `name` | string |  | Default: the file name |
+| `units` | "mm" \| "cm" \| "m" \| "in" \| "ft" |  | Units of the drawing when the file does not say (default mm), or to override it |
+| `position` | [number, number, number] |  | Where the drawing's lower-left corner goes (default 0,0,0) |
+| `rotation` | number |  | Rotation about Z in degrees |
+
+## get_reference
+
+*read (no change)*
+
+Read the lines of a reference drawing in world mm (units, position and rotation applied), to build on a plan, e.g. walls along its outlines. One line per path: "Walls: closed x,y x,y …", "Doors: arc centre x,y r R from x,y to x,y", "circle centre x,y ø D". Filter with layers; limit caps the paths (default 200).
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `reference` | string | yes | Reference drawing id or exact name |
+| `layers` | string[] |  | Only these layers (default: the visible ones) |
+| `limit` | integer |  |  |
+
+## update_reference
+
+*write (one undo step)*
+
+Change a reference drawing: name, units (rescales it), position, rotation (about Z, degrees), visible, or switch layers off/on by name ("*" = all). Reference drawings are listed in get_scene.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `reference` | string | yes | Reference drawing id or exact name |
+| `name` | string |  |  |
+| `units` | "mm" \| "cm" \| "m" \| "in" \| "ft" |  |  |
+| `position` | [number, number, number] |  | [x, y, z] in mm |
+| `rotation` | number |  |  |
+| `visible` | boolean |  |  |
+| `hide_layers` | string[] |  |  |
+| `show_layers` | string[] |  | Applied after hide_layers |
+
+## delete_reference
+
+*write (one undo step)*
+
+Remove a reference drawing (the model is not affected).
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `reference` | string | yes | Reference drawing id or exact name |
 
 ## apply_operations
 

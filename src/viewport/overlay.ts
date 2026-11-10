@@ -12,6 +12,8 @@ export const COLORS = {
   edge: 0x1f2328,
   hole: 0xd94848,
   erase: 0xe5484d,
+  /** Imported reference drawings: a muted ink colour, distinct from model edges. */
+  reference: 0x6a5acd,
 };
 
 export function axisColor(dir: THREE.Vector3): number {

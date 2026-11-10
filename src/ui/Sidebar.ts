@@ -4,6 +4,7 @@ import { buildCutList } from '../model/cutlist';
 import type { ModelDocument } from '../model/Document';
 import { polygonArea, worldBounds, worldBoundsOf } from '../model/geometry';
 import { groupChain, groupForSelection, groupMembers } from '../model/groups';
+import { DRAWING_UNITS, referenceBounds } from '../model/references';
 import type { Entity, Group, Vec3 } from '../model/types';
 import { formatLength, parseAngle, parseLength, trimNumber } from '../model/units';
 import {
@@ -24,6 +25,7 @@ export interface SidebarActions {
   duplicateSelection(): void;
   deleteSelection(): void;
   zoomTo(ids: string[]): void;
+  zoomToReference(id: string): void;
   exportCutList(): void;
   setDefaultColor(color: string): void;
   /** Current shortcut for a command, for display ('' if unbound). */
@@ -65,6 +67,8 @@ export class Sidebar {
   /** Mesh volumes (mm³, holes applied) per entity, computed when the model is idle. */
   private volumeCache: { version: number; byId: Map<string, number> } | null = null;
   private volumeTimer = 0;
+  /** Reference drawings whose layer list is open (UI only). */
+  private readonly expandedRefs = new Set<string>();
   /** Groups collapsed in the Objects tree (UI only). */
   private readonly collapsed = new Set<string>();
 
@@ -420,10 +424,14 @@ export class Sidebar {
 
   // ---- objects --------------------------------------------------------------
 
-  /** Objects tab: a tree of groups and parts, in model order. */
+  /** Objects tab: reference drawings, then a tree of groups and parts in model order. */
   private renderObjects() {
+    if (this.doc.references.length) this.renderReferences();
     if (!this.doc.entities.length) {
       this.body.append(h('p', { class: 'muted empty' }, 'No objects yet.'));
+      if (!this.doc.references.length) {
+        this.body.append(h('p', { class: 'muted small' }, 'Have a floor plan? Import it as a DXF drawing (top bar, or drop the file here) and draw on top of it.'));
+      }
       return;
     }
     const list = h('ul', { class: 'outliner' });
@@ -502,6 +510,73 @@ export class Sidebar {
       }
     }
     this.body.append(list);
+  }
+
+  /** Reference drawings (ADR 0014): units, visibility, layers, delete. Not selectable. */
+  private renderReferences() {
+    const doc = this.doc;
+    const list = h('ul', { class: 'outliner references' });
+    for (const r of doc.references) {
+      const g = doc.geometryOf(r.id);
+      const expanded = this.expandedRefs.has(r.id);
+      const b = g ? referenceBounds({ ...r, hiddenLayers: [] }, g).getSize(new THREE.Vector3()) : null;
+      const size = b ? `${formatLength(b.x, this.units, false)}×${formatLength(b.y, this.units, false)}` : '';
+      const units = h(
+        'select',
+        {
+          class: 'select tiny',
+          title: 'Units the drawing was made in (rescales it)',
+          onclick: (ev: MouseEvent) => ev.stopPropagation(),
+          onchange: (ev: Event) => this.call('update_reference', { reference: r.id, units: (ev.target as HTMLSelectElement).value }, 'Drawing units'),
+        },
+        ...DRAWING_UNITS.map((u) => h('option', { value: u, selected: u === r.units }, u)),
+      );
+      list.append(
+        h('li', {
+          class: `outliner-item reference ${r.visible ? '' : 'hidden'}`,
+          title: `${r.name}: a reference drawing to snap to, not part of the model. Click for units and layers, double-click to zoom.`,
+          onclick: () => this.toggleRef(r.id),
+          ondblclick: () => this.actions.zoomToReference(r.id),
+        },
+          h('button', { class: 'icon-btn caret', 'aria-label': expanded ? 'Hide layers' : 'Show layers' }, expanded ? '▾' : '▸'),
+          h('span', { class: 'chip ref-chip', html: icon('drawing', 14) }),
+          h('span', { class: 'outliner-name' }, r.name),
+          h('span', { class: 'muted small' }, size),
+          this.eye(r.visible, () => this.call('update_reference', { reference: r.id, visible: !r.visible }, r.visible ? 'Hide drawing' : 'Show drawing')),
+          h('button', {
+            class: 'icon-btn',
+            title: 'Remove this drawing (undoable)',
+            html: icon('trash', 15),
+            onclick: (ev: MouseEvent) => {
+              ev.stopPropagation();
+              this.call('delete_reference', { reference: r.id }, 'Remove drawing');
+            },
+          }),
+        ),
+      );
+      if (!expanded || !g) continue;
+      list.append(h('li', { class: 'outliner-item layer', style: 'padding-left:34px' }, h('span', { class: 'outliner-name muted' }, 'Drawn in'), units));
+      const counts = new Map<number, number>();
+      for (const p of g.paths) counts.set(p.layer, (counts.get(p.layer) ?? 0) + 1);
+      const hidden = new Set(r.hiddenLayers);
+      g.layers.forEach((layer, i) => {
+        const on = !hidden.has(layer);
+        list.append(
+          h('li', { class: `outliner-item layer ${on ? '' : 'hidden'}`, style: 'padding-left:34px' },
+            h('span', { class: 'outliner-name', title: layer }, layer),
+            h('span', { class: 'muted small' }, String(counts.get(i) ?? 0)),
+            this.eye(on, () => this.call('update_reference', { reference: r.id, [on ? 'hide_layers' : 'show_layers']: [layer] }, on ? 'Hide layer' : 'Show layer')),
+          ),
+        );
+      });
+    }
+    this.body.append(this.section(`Reference drawings`, list));
+  }
+
+  private toggleRef(id: string) {
+    if (this.expandedRefs.has(id)) this.expandedRefs.delete(id);
+    else this.expandedRefs.add(id);
+    this.render(true);
   }
 
   private eye(visible: boolean, toggle: () => void): HTMLElement {

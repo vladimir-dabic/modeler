@@ -48,6 +48,7 @@ export const COMMANDS: CommandDef[] = [
   { id: 'file.new', label: 'New model', category: 'File', keys: [] },
   { id: 'file.open', label: 'Open project…', category: 'File', keys: ['Mod+O'] },
   { id: 'file.save', label: 'Save project', category: 'File', keys: ['Mod+S'] },
+  { id: 'file.importDxf', label: 'Import DXF drawing (reference)…', category: 'File', keys: [] },
   { id: 'file.exportStl', label: 'Export STL', category: 'File', keys: ['Mod+E'] },
   { id: 'file.exportCutList', label: 'Export cut list (CSV)', category: 'File', keys: [] },
 

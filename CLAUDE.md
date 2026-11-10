@@ -20,6 +20,7 @@ The UI, the in-app AI assistant and the MCP server are all clients of one typed,
 ## Conventions (details in docs/development.md)
 - **Units:** world is **Z-up, millimetres**; rotations are Euler XYZ in degrees. Store clean numbers (`cleanNumber` / `cleanVec`).
 - **Model changes:** UI code goes through the API; only interactive tools mutate `ModelDocument` directly inside a transaction. One user action or AI turn = one undo step.
+- **Reference drawings** (imported DXF plans, ADR 0014): `doc.references` + `doc.geometryOf(id)`, helpers in `src/model/references.ts`. They are never entities: tools, CSG, cut lists and exports must keep ignoring them.
 - **Groups:** flat membership (`groupId` / `parentId`, no transforms), helpers in `src/model/groups.ts`. Tools pick whole units via `Tool.unitOf`.
 - **Shortcuts:** never hard-code them. Add commands to `src/commands.ts` and handle them in `App.runCommand`. Reserved keys are enforced by `reservedReason` in `keymap.ts`.
 - **Workspaces:** they are configuration (`src/model/workspaces.ts`). Read `app.workspace` / `ctx.workspace()` instead of branching on ids. `doc.workspace` / `doc.printer` are document settings, not undoable.

@@ -61,6 +61,50 @@ export interface Group {
 
 export type Unit = 'mm' | 'cm' | 'm' | 'in';
 
+// ---- reference drawings (ADR 0014) ----------------------------------------------------
+
+/** Units a drawing can be in; `DRAWING_UNIT_MM` converts them to mm. */
+export type DrawingUnit = 'mm' | 'cm' | 'm' | 'in' | 'ft';
+
+/** One polyline of a drawing, in drawing units. Arcs and circles are tessellated. */
+export interface DrawingPath {
+  /** Index into DrawingGeometry.layers. */
+  layer: number;
+  points: Vec2[];
+  closed?: boolean;
+  /** Set for arcs/circles: their centre (a snap point); only the ends are corner snaps. */
+  center?: Vec2;
+}
+
+/** Immutable line geometry of an imported drawing, kept out of undo snapshots. */
+export interface DrawingGeometry {
+  layers: string[];
+  paths: DrawingPath[];
+}
+
+/**
+ * A reference drawing: lines to trace and snap to, not part of the model (no cut list,
+ * export or CSG). Lies on the XY plane through `position`, rotated about Z.
+ */
+export interface ReferenceDrawing {
+  id: string;
+  name: string;
+  kind: 'drawing';
+  units: DrawingUnit;
+  /** Where the drawing's origin sits, in mm. */
+  position: Vec3;
+  /** Rotation about Z, degrees. */
+  rotation: number;
+  visible: boolean;
+  /** Layers switched off. */
+  hiddenLayers: string[];
+}
+
+/** A reference drawing as stored in a file: metadata plus its geometry. */
+export interface ReferenceFile extends ReferenceDrawing {
+  geometry: DrawingGeometry;
+}
+
 export interface DocumentFile {
   format: 'modeler';
   version: 1;
@@ -70,4 +114,5 @@ export interface DocumentFile {
   printer?: PrinterSetting;
   entities: Entity[];
   groups?: Group[];
+  references?: ReferenceFile[];
 }

@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import type { ModelDocument } from '../model/Document';
 import { worldBounds } from '../model/geometry';
 import { groupChain, groupMembers, subtreeGroupIds } from '../model/groups';
-import type { Entity, Group } from '../model/types';
+import { DRAWING_UNIT_MM, referenceBounds } from '../model/references';
+import type { Entity, Group, ReferenceDrawing } from '../model/types';
 import { polygonArea } from '../model/geometry';
 import type { TargetInput } from './schemas';
 
@@ -103,6 +104,20 @@ export function groupLine(g: Group, entities: Entity[], groups: Group[]): string
   return `${g.id} "${g.name}" [group, ${members.length} part${members.length === 1 ? '' : 's'}] ${times([b.x, b.y, b.z])} at ${v3([min.x, min.y, min.z])}`;
 }
 
+/** One line per reference drawing, e.g. `r8x2 "Ground floor" drawing 12400×9800 mm at 0,0,0 (7 layers, 2 hidden)`. */
+export function referenceLine(r: ReferenceDrawing, doc: ModelDocument): string {
+  const g = doc.geometryOf(r.id);
+  const b = g ? referenceBounds({ ...r, hiddenLayers: [] }, g) : null;
+  const size = b && !b.isEmpty() ? b.getSize(new THREE.Vector3()) : null;
+  const parts = [`${r.id} "${r.name}" drawing${size ? ` ${times([size.x, size.y])} mm` : ''} at ${v3(r.position)}`];
+  if (r.rotation) parts.push(`rot ${r2(r.rotation)}`);
+  if (r.units !== 'mm') parts.push(`(drawn in ${r.units}, ×${DRAWING_UNIT_MM[r.units]})`);
+  if (!r.visible) parts.push('[hidden]');
+  const layers = g?.layers.length ?? 0;
+  parts.push(`(${layers} layer${layers === 1 ? '' : 's'}${r.hiddenLayers.length ? `, ${r.hiddenLayers.length} hidden` : ''})`);
+  return parts.join(' ');
+}
+
 /** Full JSON summary of one part. */
 export function entitySummary(e: Entity, groups: Group[]) {
   const b = worldBounds(e);
@@ -159,6 +174,21 @@ export class OperationContext {
     const e = this.doc.get(id);
     if (!e) throw new ApiError('not_found', `No part with id "${id}"`, 'Use get_scene to list ids.');
     return e;
+  }
+
+  /** Find a reference drawing by id, or by exact (case-insensitive) name. */
+  reference(ref: string): ReferenceDrawing {
+    const { doc } = this;
+    const byId = doc.getReference(ref);
+    if (byId) return byId;
+    const matches = doc.references.filter((r) => r.name.toLowerCase() === ref.toLowerCase());
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) throw new ApiError('ambiguous', `${matches.length} reference drawings are named "${ref}"`, `Use an id: ${matches.map((r) => r.id).join(', ')}`);
+    throw new ApiError(
+      'not_found',
+      `No reference drawing "${ref}"`,
+      doc.references.length ? `Reference drawings: ${doc.references.map((r) => `${r.id} "${r.name}"`).join(', ')}` : 'There are none; import one with import_dxf.',
+    );
   }
 
   /** Find a group by id, or by exact (case-insensitive) name. */

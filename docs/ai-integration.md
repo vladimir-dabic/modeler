@@ -101,9 +101,9 @@ The server (`mcp/src`, bundled to `mcp/dist/modeler-mcp.mjs` by `npm run build:m
   - Each tool call runs in the tab through `api.callAsync(name, input, { source: 'mcp', label: 'AI: …' })`, so you watch the model change live and every call is one labelled undo step. `apply_operations` takes an optional `label` for that step.
   - `render_views` returns PNGs as MCP image content.
 - **Headless mode:** when no tab is connected, calls run on the server's own in-memory `ModelDocument`. The first change says so in `warnings`.
-- **Files** (`open_file`, `save_file`, `export_stl`) are `host` operations that only the server can run, limited to its working folder (`--root`).
+- **Files** (`open_file`, `save_file`, `export_stl`, `import_dxf { path }`) are `host` operations that only the server can run, limited to its working folder (`--root`).
   - In live mode they run in Node on a copy of the tab's model (with its selection).
-  - `open_file` pushes the loaded model back to the tab as one undoable step.
+  - `open_file` and `import_dxf` push the result back to the tab as one undoable step.
   - The browser never gets file access.
 - `render_views` works only in live-bridge mode. It returns `unsupported` headless (until we add offscreen rendering in Node).
 

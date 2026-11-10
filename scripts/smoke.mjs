@@ -463,6 +463,89 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   rmSync(root, { recursive: true, force: true });
 }
 
+// 18. DXF import: a kitchen plan becomes a reference drawing you can snap to (ADR 0014).
+{
+  const dxf = [];
+  const add = (...pairs) => dxf.push(...pairs);
+  add(0, 'SECTION', 2, 'HEADER', 9, '$INSUNITS', 70, 4, 0, 'ENDSEC');
+  add(0, 'SECTION', 2, 'TABLES', 0, 'TABLE', 2, 'LAYER', 0, 'LAYER', 2, 'Walls', 70, 0, 62, 7, 0, 'LAYER', 2, 'Dims', 70, 0, 62, -1, 0, 'ENDTAB', 0, 'ENDSEC');
+  add(0, 'SECTION', 2, 'BLOCKS', 0, 'BLOCK', 2, 'BASE600', 10, 0, 20, 0);
+  add(0, 'LWPOLYLINE', 8, '0', 90, 4, 70, 1, 10, 0, 20, 0, 10, 600, 20, 0, 10, 600, 20, 600, 10, 0, 20, 600);
+  add(0, 'LINE', 8, '0', 10, 0, 20, 0, 11, 600, 21, 600, 0, 'ENDBLK', 0, 'ENDSEC');
+  add(0, 'SECTION', 2, 'ENTITIES');
+  add(0, 'LWPOLYLINE', 8, 'Walls', 90, 4, 70, 1, 10, -250, 20, -250, 10, 4250, 20, -250, 10, 4250, 20, 3250, 10, -250, 20, 3250);
+  add(0, 'LWPOLYLINE', 8, 'Walls', 90, 4, 70, 1, 10, 0, 20, 0, 10, 4000, 20, 0, 10, 4000, 20, 3000, 10, 0, 20, 3000);
+  add(0, 'ARC', 8, 'Doors', 10, 3000, 20, 0, 40, 800, 50, 90, 51, 180);
+  add(0, 'INSERT', 8, 'Cabinets', 2, 'BASE600', 10, 0, 20, 2400, 70, 4, 44, 600);
+  add(0, 'LINE', 8, 'Dims', 10, 0, 20, -600, 11, 4000, 21, -600);
+  add(0, 'TEXT', 8, 'Walls', 1, 'Kitchen');
+  add(0, 'ENDSEC', 0, 'EOF');
+
+  const tab = await browser.newPage({ viewport: { width: 1300, height: 850 } });
+  tab.on('pageerror', (e) => errors.push(`dxf tab pageerror: ${e.message}`));
+  await tab.goto(URL);
+  await tab.waitForFunction(() => window.modeler);
+  await tab.evaluate(() => window.modeler.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true));
+  await tab.click('.ws-btn:has-text("Workshop")');
+  const [chooser] = await Promise.all([tab.waitForEvent('filechooser'), tab.click('button[aria-label^="Import a DXF"]')]);
+  await chooser.setFiles({ name: 'kitchen.dxf', mimeType: 'application/dxf', buffer: Buffer.from(dxf.join('\n')) });
+  await tab.waitForFunction(() => window.modeler.doc.references.length === 1, null, { timeout: 5000 }).catch(() => {});
+  const ref = await tab.evaluate(() => {
+    const d = window.modeler.doc;
+    const r = d.references[0];
+    return r && { name: r.name, units: r.units, hidden: r.hiddenLayers, layers: d.geometryOf(r.id).layers, parts: d.entities.length, label: d.undoLabel };
+  });
+  check('DXF imports as a reference drawing, not parts', ref?.name === 'kitchen' && ref.parts === 0 && ref.label === 'Import kitchen', JSON.stringify(ref));
+  check('DXF layers, units and off layers are kept', ref?.units === 'mm' && ref.layers.join() === 'Walls,Doors,Cabinets,Dims' && ref.hidden.join() === 'Dims', JSON.stringify(ref));
+  check('Objects tab lists the drawing', (await tab.textContent('.sidebar')).includes('Reference drawings'));
+
+  // Trace the cabinet run: box from one cabinet corner to the opposite one, 900 high.
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.viewport.setView('top', false);
+    app.viewport.fitBox(app.viewport.referencesBox());
+  });
+  const at = async (x, y) =>
+    tab.evaluate(([x, y]) => {
+      const app = window.modeler;
+      const r = app.viewport.canvas.getBoundingClientRect();
+      const s = app.viewport.toScreen(new (app.viewport.camera.position.constructor)(x, y, 0));
+      return { x: r.left + s.x + 4, y: r.top + s.y - 3 }; // a few px off: the snap must pull it in
+    }, [x, y]);
+  // The plan is shifted so its lower-left extent (-250, -600: the off "Dims" layer counts) is the origin.
+  const c1 = await at(250, 3000);
+  const c2 = await at(2650, 3600);
+  await tab.keyboard.press('b');
+  await tab.mouse.move(c1.x, c1.y, { steps: 3 });
+  await tab.mouse.click(c1.x, c1.y);
+  await tab.mouse.move(c2.x, c2.y, { steps: 5 });
+  await tab.mouse.click(c2.x, c2.y);
+  await tab.keyboard.type('900');
+  await tab.keyboard.press('Enter');
+  const traced = await tab.evaluate(() => window.modeler.doc.entities.map((e) => ({ p: e.position, s: e.size })));
+  check('box snaps to the drawing\'s corners', traced.length === 1 && traced[0].p.join() === '250,3000,0' && traced[0].s.join() === '2400,600,900', JSON.stringify(traced));
+
+  // Layers and units from the panel.
+  await tab.click('.outliner-item.reference .outliner-name');
+  await tab.click('.outliner-item.layer:has-text("Cabinets") .eye');
+  await tab.selectOption('.references select', 'cm');
+  const after = await tab.evaluate(() => ({ ...window.modeler.doc.references[0] }));
+  check('panel hides layers and changes units', after.hiddenLayers.includes('Cabinets') && after.units === 'cm', JSON.stringify(after));
+  await tab.keyboard.press('Escape');
+  await tab.keyboard.press('Meta+z');
+  await tab.keyboard.press('Meta+z');
+  const undone = await tab.evaluate(() => ({ ...window.modeler.doc.references[0] }));
+  check('undo restores layers and units', undone.units === 'mm' && !undone.hiddenLayers.includes('Cabinets'), JSON.stringify(undone));
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.viewport.setView('iso', false);
+    app.viewport.zoomExtents();
+  });
+  await tab.waitForTimeout(200);
+  await tab.screenshot({ path: `${outDir}/modeler-dxf.png` });
+  await tab.close();
+}
+
 check('no console errors', errors.length === 0, errors.join('\n'));
 await browser.close();
 console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');

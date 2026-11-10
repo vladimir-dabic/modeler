@@ -54,7 +54,7 @@ api.toolDefinitions();                                     // [{ name, descripti
 | `write` | one transaction / undo step; validated; rolled back on error; returns `{ ids }` |
 | `settings` | document settings that are saved but not undoable (`set_workspace`, `set_printer`); the app reacts via `doc.onSettingsChange` |
 | `history` | `undo`, `redo` |
-| `host` | needs a host capability, called with `callAsync`: `render_views` (`host.renderViews`, the app), `open_file` / `save_file` / `export_stl` (`host.files`, only the MCP server, limited to its working folder: [ADR 0013](adr/0013-mcp-server-bridge-and-files.md)). Without the capability they return `unsupported` |
+| `host` | needs a host capability, called with `callAsync`: `render_views` (`host.renderViews`, the app), `open_file` / `save_file` / `export_stl` / `import_dxf { path }` (`host.files`, only the MCP server, limited to its working folder: [ADR 0013](adr/0013-mcp-server-bridge-and-files.md)). Without the capability they return `unsupported` |
 
 ### Results
 
@@ -93,6 +93,19 @@ type Target =
 - **No match** is a `not_found` error, listing names that do exist.
 - **A plain name that matches several parts** is `ambiguous`, and the error lists their ids. Wildcards and filters are explicit about wanting many, so nothing is ever changed by guesswork.
 - **Grouped parts move as one:** operations that move things (`distribute`, …) keep a group together when *all* its members are targeted.
+
+## Reference drawings
+
+Imported plans the model is built on ([ADR 0014](adr/0014-exchange-formats-and-reference-drawings.md)). They are not parts, so selectors never match them.
+
+| Operation | |
+|---|---|
+| `import_dxf { path \| text, name?, units?, position?, rotation? }` | `host`. `path` needs `host.files` (MCP); the app passes `text`. One undo step. The result has the size in mm, layers with path counts, skipped entity types, and a `hint` when assumed units look wrong |
+| `get_reference { reference, layers?, limit? }` | `read`. One compact line per path in world mm: `Walls: closed x,y …`, `arc centre … r …`, `circle centre … ø…` |
+| `update_reference { reference, name?, units?, position?, rotation?, visible?, hide_layers?, show_layers? }` | `write`. Layers by name, `"*"` = all |
+| `delete_reference { reference }` | `write` |
+
+`get_scene` lists them under `references`. A drawing is addressed by id or exact name (`ctx.reference`).
 
 ## Token efficiency
 

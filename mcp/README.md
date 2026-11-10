@@ -9,9 +9,9 @@ An MCP server that lets Claude (Claude Code, Claude Desktop, or any MCP client) 
 | When | the app is open and you clicked **Connect AI** | no app connected |
 | Calls edit | the model in your browser tab, as labelled undo steps (`AI: …`) | the server's own in-memory model |
 | `render_views` | yes (PNG images) | `unsupported` |
-| `open_file` / `save_file` / `export_stl` | yes: they run in the server on the tab's model | yes |
+| `open_file` / `save_file` / `export_stl` / `import_dxf` | yes: they run in the server on the tab's model | yes |
 
-File paths are relative to the server's **working folder** (`--root`, default: the folder it was started in). Paths outside it are refused, and only `.json` project files and `.stl` files are written.
+File paths are relative to the server's **working folder** (`--root`, default: the folder it was started in). Paths outside it are refused. Only `.json` project files and `.stl` files are written; `.dxf` files are read by `import_dxf`.
 
 ## Build
 
@@ -33,6 +33,8 @@ claude mcp add modeler -- node "$PWD/mcp/dist/modeler-mcp.mjs" --root "$PWD/proj
 Use any folder you like for `--root` (it must exist). Then `npm run dev`, open http://localhost:5173, click **Connect AI** in the top bar, and ask Claude e.g. *"build a bookcase with 4 shelves in the open modeler"*.
 
 Headless, without the app: *"make a 60×40×20 mm box with four M3 holes in the corners and export box.stl"*.
+
+With a plan in the working folder: *"import kitchen.dxf and put 600 mm base cabinets along the back wall"*. Claude reads the plan's lines with `get_reference`.
 
 ## Set up Claude Desktop
 

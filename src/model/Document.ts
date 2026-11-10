@@ -1,5 +1,5 @@
 import { pruneGroups } from './groups';
-import type { DocumentFile, Entity, EntityKind, Group, Unit } from './types';
+import type { DocumentFile, DrawingGeometry, Entity, EntityKind, Group, ReferenceDrawing, ReferenceFile, Unit } from './types';
 import { DEFAULT_PRINTER_SETTING, type PrinterSetting, type WorkspaceId } from './workspaces';
 
 export interface ChangeEvent {
@@ -40,6 +40,13 @@ interface UndoEntry {
 export class ModelDocument {
   entities: Entity[] = [];
   groups: Group[] = [];
+  /** Reference drawings (ADR 0014): traced and snapped to, never part of the model. */
+  references: ReferenceDrawing[] = [];
+  /**
+   * Their immutable line geometry by reference id. Kept out of undo snapshots (only the
+   * small metadata is snapshotted), and not pruned on delete so undo can bring it back.
+   */
+  private readonly drawingGeometry = new Map<string, DrawingGeometry>();
   readonly selection = new Set<string>();
   /** The group being edited ("opened"); clicks then pick parts inside it. UI state only. */
   openGroupId: string | null = null;
@@ -96,6 +103,15 @@ export class ModelDocument {
 
   getGroup(id: string): Group | undefined {
     return this.groups.find((g) => g.id === id);
+  }
+
+  getReference(id: string): ReferenceDrawing | undefined {
+    return this.references.find((r) => r.id === id);
+  }
+
+  /** Line geometry of a reference drawing. */
+  geometryOf(id: string): DrawingGeometry | undefined {
+    return this.drawingGeometry.get(id);
   }
 
   selected(): Entity[] {
@@ -221,13 +237,14 @@ export class ModelDocument {
   }
 
   private snapshot(): string {
-    return JSON.stringify({ entities: this.entities, groups: this.groups });
+    return JSON.stringify({ entities: this.entities, groups: this.groups, references: this.references });
   }
 
   private restore(snapshot: string) {
-    const state = JSON.parse(snapshot) as { entities: Entity[]; groups: Group[] };
+    const state = JSON.parse(snapshot) as { entities: Entity[]; groups: Group[]; references: ReferenceDrawing[] };
     this.entities = state.entities;
     this.groups = state.groups;
+    this.references = state.references;
     let selectionChanged = false;
     for (const id of [...this.selection]) {
       if (!this.get(id)) {
@@ -275,6 +292,27 @@ export class ModelDocument {
   setGroups(groups: Group[]): void {
     this.autoTx(() => {
       this.groups = pruneGroups(this.entities, groups);
+    });
+  }
+
+  /** Add a reference drawing with its (immutable) geometry. */
+  addReference(ref: ReferenceDrawing, geometry: DrawingGeometry): ReferenceDrawing {
+    this.drawingGeometry.set(ref.id, geometry);
+    this.autoTx(() => this.references.push(ref));
+    return ref;
+  }
+
+  /** Mutate a reference drawing's metadata (name, units, placement, visibility). */
+  updateReference(id: string, mutate: (r: ReferenceDrawing) => void): void {
+    const r = this.getReference(id);
+    if (!r) return;
+    this.autoTx(() => mutate(r));
+  }
+
+  removeReference(id: string): void {
+    if (!this.getReference(id)) return;
+    this.autoTx(() => {
+      this.references = this.references.filter((r) => r.id !== id);
     });
   }
 
@@ -338,7 +376,8 @@ export class ModelDocument {
   // ---- whole document -----------------------------------------------------
 
   toFile(): DocumentFile {
-    const state = JSON.parse(this.snapshot()) as { entities: Entity[]; groups: Group[] };
+    const state = JSON.parse(this.snapshot()) as { entities: Entity[]; groups: Group[]; references: ReferenceDrawing[] };
+    const references: ReferenceFile[] = state.references.map((r) => ({ ...r, geometry: this.drawingGeometry.get(r.id) ?? { layers: [], paths: [] } }));
     return {
       format: 'modeler',
       version: 1,
@@ -347,6 +386,7 @@ export class ModelDocument {
       printer: structuredClone(this.printer),
       entities: state.entities,
       groups: state.groups,
+      ...(references.length ? { references } : {}),
     };
   }
 
@@ -358,16 +398,24 @@ export class ModelDocument {
     if (file.printer) this.printer = structuredClone(file.printer);
     this.openGroupId = null;
     const groups = file.groups ?? [];
+    if (resetHistory) this.drawingGeometry.clear();
+    // Geometry of replaced references stays in the map, so undoing this load restores them.
+    const references = (file.references ?? []).map(({ geometry, ...meta }) => {
+      this.drawingGeometry.set(meta.id, geometry);
+      return meta;
+    });
     if (resetHistory) {
       this.undoStack = [];
       this.redoStack = [];
       this.entities = file.entities;
       this.groups = groups;
+      this.references = references;
       this.emitChange(true);
     } else {
       this.transact(() => {
         this.entities = file.entities;
         this.groups = groups;
+        this.references = references;
       }, label);
     }
     this.clearSelection();

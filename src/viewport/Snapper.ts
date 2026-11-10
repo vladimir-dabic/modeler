@@ -12,6 +12,7 @@ import {
   type DrawPlane,
   type SnapPoint,
 } from '../model/geometry';
+import { referenceSnapPoints } from '../model/references';
 import type { PickHit, Viewport } from './Viewport';
 
 export type InferenceKind = 'endpoint' | 'midpoint' | 'center' | 'face' | 'ground' | 'plane' | 'axis' | 'free';
@@ -61,6 +62,11 @@ export class Snapper {
   private allPoints(): SnapPoint[] {
     if (this.cacheVersion !== this.doc.version) {
       this.points = this.doc.entities.filter((e) => e.visible).flatMap(snapPoints);
+      // Corners, midpoints and centres of visible reference drawings (ADR 0014).
+      for (const r of this.doc.references) {
+        const g = r.visible ? this.doc.geometryOf(r.id) : undefined;
+        if (g) for (const sp of referenceSnapPoints(r, g)) this.points.push(sp);
+      }
       this.cacheVersion = this.doc.version;
     }
     return this.points;
@@ -76,19 +82,22 @@ export class Snapper {
   findSnapPoint(px: THREE.Vector2, exclude?: Set<string>, extra: SnapPoint[] = []): SnapPoint | null {
     let best: SnapPoint | null = null;
     let bestScore = Infinity;
-    for (const sp of [...extra, ...this.allPoints()]) {
-      if (exclude?.has(sp.entityId)) continue;
+    // Loops, not a spread: reference drawings can add tens of thousands of points.
+    const check = (sp: SnapPoint) => {
+      if (exclude?.has(sp.entityId)) return;
       const s = this.viewport.toScreen(sp.point);
-      if (!s.inFront) continue;
+      if (!s.inFront) return;
       const d = Math.hypot(s.x - px.x, s.y - px.y);
-      if (d > SNAP_RADIUS_PX) continue;
+      if (d > SNAP_RADIUS_PX) return;
       // Small bias so corners win over nearby midpoints.
       const score = d + (KIND_PRIORITY[sp.kind] ?? 3) * 3;
       if (score < bestScore) {
         bestScore = score;
         best = sp;
       }
-    }
+    };
+    for (const sp of extra) check(sp);
+    for (const sp of this.allPoints()) check(sp);
     return best;
   }
 

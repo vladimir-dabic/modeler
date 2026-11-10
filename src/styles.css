@@ -1345,3 +1345,26 @@ kbd {
     opacity: 0.45;
   }
 }
+
+/* Reference drawings in the Objects tab (ADR 0014). */
+.outliner-item.reference {
+  cursor: default;
+}
+
+.ref-chip {
+  display: grid;
+  place-items: center;
+  color: #6a5acd;
+  background: transparent;
+}
+
+.select.tiny {
+  height: 22px;
+  padding: 0 2px;
+  font-size: 11.5px;
+}
+
+.outliner-item.layer {
+  cursor: default;
+  font-size: 12.5px;
+}

@@ -5,6 +5,7 @@ import { buildCutGeometry, cuttersFor } from '../model/csg';
 import type { ModelDocument } from '../model/Document';
 import { entityMatrix, worldBoundsOf } from '../model/geometry';
 import { isInsideGroup } from '../model/groups';
+import { referenceBounds, referenceMatrix, referenceSegments } from '../model/references';
 import type { Entity } from '../model/types';
 import type { WorkspaceConfig } from '../model/workspaces';
 import { featureEdges } from './edges';
@@ -56,6 +57,9 @@ export class Viewport {
   readonly orthoCamera: THREE.OrthographicCamera;
   readonly controls: OrbitControls;
   readonly overlayRoot = new THREE.Group();
+  /** Reference drawings (ADR 0014): lines only, never picked. */
+  private readonly referenceRoot = new THREE.Group();
+  private readonly referenceObjects = new Map<string, { key: string; lines: THREE.LineSegments }>();
   readonly canvas: HTMLCanvasElement;
 
   private readonly labelRenderer = new CSS2DRenderer();
@@ -107,7 +111,7 @@ export class Viewport {
     this.setNavigationMode('default');
     this.controls.addEventListener('change', () => this.requestRender());
 
-    this.scene.add(this.entityRoot, this.overlayRoot);
+    this.scene.add(this.entityRoot, this.referenceRoot, this.overlayRoot);
     this.addLights();
     this.addGridAndAxes();
 
@@ -262,10 +266,27 @@ export class Viewport {
     this.requestRender();
   }
 
-  /** Fit the view to the given entities (or everything visible). */
+  /** World bounds of the visible reference drawings (empty box if none). */
+  referencesBox(ids?: string[]): THREE.Box3 {
+    const box = new THREE.Box3();
+    for (const r of this.doc.references) {
+      if (!r.visible || (ids && !ids.includes(r.id))) continue;
+      const g = this.doc.geometryOf(r.id);
+      if (g) box.union(referenceBounds(r, g));
+    }
+    return box;
+  }
+
+  /** Fit the view to the given entities (or everything visible, reference drawings included). */
   zoomExtents(entities?: Entity[]) {
     const list = (entities?.length ? entities : this.doc.entities).filter((e) => e.visible);
-    const box = list.length ? worldBoundsOf(list) : this.homeBox.clone();
+    const box = list.length ? worldBoundsOf(list) : new THREE.Box3();
+    if (!entities?.length) box.union(this.referencesBox());
+    this.fitBox(box.isEmpty() ? this.homeBox.clone() : box);
+  }
+
+  /** Fit the view to a world box, keeping the viewing direction. */
+  fitBox(box: THREE.Box3) {
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const radius = Math.max(sphere.radius, 10);
     const target = this.controls.target;
@@ -417,7 +438,8 @@ export class Viewport {
     const cam = new THREE.PerspectiveCamera(FOV, 1, 1, 1e6);
     cam.up.set(0, 0, 1);
     const list = this.doc.entities.filter((e) => e.visible);
-    const box = list.length ? worldBoundsOf(list) : this.homeBox.clone();
+    const box = (list.length ? worldBoundsOf(list) : new THREE.Box3()).union(this.referencesBox());
+    if (box.isEmpty()) box.copy(this.homeBox);
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const radius = Math.max(sphere.radius, 10);
     const hidden = [this.overlayRoot, this.faceHighlight].filter((o) => o.visible);
@@ -490,7 +512,43 @@ export class Viewport {
         this.objects.delete(id);
       }
     }
+    this.syncReferences();
     this.updateStyles();
+  }
+
+  /** Lines are rebuilt only when the visible layers change; placement is just a matrix. */
+  private syncReferences() {
+    const seen = new Set<string>();
+    for (const r of this.doc.references) {
+      const g = this.doc.geometryOf(r.id);
+      if (!g) continue;
+      seen.add(r.id);
+      const key = r.hiddenLayers.join('\u0000');
+      let entry = this.referenceObjects.get(r.id);
+      if (entry && entry.key !== key) {
+        this.referenceRoot.remove(entry.lines);
+        disposeObject(entry.lines);
+        entry = undefined;
+      }
+      if (!entry) {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(referenceSegments(r, g), 3));
+        const lines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: COLORS.reference, transparent: true, opacity: 0.85 }));
+        lines.matrixAutoUpdate = false;
+        entry = { key, lines };
+        this.referenceObjects.set(r.id, entry);
+        this.referenceRoot.add(lines);
+      }
+      entry.lines.matrix.copy(referenceMatrix(r));
+      entry.lines.matrixWorldNeedsUpdate = true;
+      entry.lines.visible = r.visible;
+    }
+    for (const [id, entry] of this.referenceObjects) {
+      if (seen.has(id)) continue;
+      this.referenceRoot.remove(entry.lines);
+      disposeObject(entry.lines);
+      this.referenceObjects.delete(id);
+    }
   }
 
   private buildEntityObject(e: Entity, cutters: Entity[], key: string): EntityObject {

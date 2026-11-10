@@ -75,6 +75,8 @@ function openTab(port: number, origin = APP_ORIGIN) {
   return { doc, api, client, statuses };
 }
 
+const PLAN_DXF = [0, 'SECTION', 2, 'HEADER', 9, '$INSUNITS', 70, 4, 0, 'ENDSEC', 0, 'SECTION', 2, 'ENTITIES', 0, 'LWPOLYLINE', 8, 'Walls', 90, 4, 70, 1, 10, 0, 20, 0, 10, 4000, 20, 0, 10, 4000, 20, 3000, 10, 0, 20, 3000, 0, 'ENDSEC', 0, 'EOF'].join('\n');
+
 const BOOKCASE = {
   label: 'bookcase',
   operations: [
@@ -146,6 +148,18 @@ describe('MCP server: headless mode', () => {
     expect(bytes.length).toBe(stl.data.bytes);
     expect(bytes.readUInt32LE(80)).toBe(stl.data.triangles);
     expect(stl.data.solids).toBe(1);
+  });
+
+  it('imports a DXF headless and saves it with the project', async () => {
+    const { call, local } = await connect();
+    await writeFile(join(dir, 'plan.dxf'), PLAN_DXF);
+    expect((await call('import_dxf', { path: 'plan.dxf', name: 'Kitchen plan' })).ok).toBe(true);
+    expect((await call('get_scene')).data.references[0]).toMatch(/"Kitchen plan" drawing 4000×3000 mm/);
+    await call('save_file', { path: 'kitchen.modeler.json' });
+    const file = parseDocumentFile(await readFile(join(dir, 'kitchen.modeler.json'), 'utf8'));
+    expect(file.references?.[0].geometry.paths).toHaveLength(1);
+    expect(local.doc.references).toHaveLength(1);
+    expect((await call('import_dxf', { path: '../plan.dxf' })).error.message).toMatch(/outside/);
   });
 
   it('keeps files inside the working folder', async () => {
@@ -232,6 +246,29 @@ describe('MCP server: live bridge', () => {
     expect(tab.doc.undoLabel).toBe('AI: Open bookcase.modeler.json');
     tab.doc.undo();
     expect(tab.doc.entities.map((e) => e.name)).toEqual(['Scratch']);
+  });
+
+  it('imports a DXF from the working folder into the tab as one undo step', async () => {
+    const bridge = await startBridge();
+    const { call, local } = await connect(bridge);
+    const tab = openTab(bridge.port!);
+    await until(() => bridge.connected, 'tab to connect');
+    await call('add_box', { name: 'Existing', size: [10, 10, 10] });
+    await writeFile(join(dir, 'plan.dxf'), PLAN_DXF);
+    const r = await call('import_dxf', { path: 'plan.dxf' });
+    expect(r).toMatchObject({ ok: true, data: { name: 'plan', units: 'mm', size_mm: [4000, 3000] } });
+    expect(tab.doc.references.map((x) => x.name)).toEqual(['plan']);
+    expect(tab.doc.geometryOf(tab.doc.references[0].id)?.paths).toHaveLength(1);
+    expect(tab.doc.entities.map((e) => e.name)).toEqual(['Existing']);
+    expect(tab.doc.undoLabel).toBe('AI: Import plan.dxf');
+    expect(local.doc.references).toHaveLength(0);
+    // The AI can then change it in the tab.
+    expect((await call('update_reference', { reference: 'plan', units: 'cm' })).ok).toBe(true);
+    expect(tab.doc.references[0].units).toBe('cm');
+    tab.doc.undo();
+    tab.doc.undo();
+    expect(tab.doc.references).toHaveLength(0);
+    expect(tab.doc.entities).toHaveLength(1);
   });
 
   it('falls back to headless when the tab disconnects', async () => {

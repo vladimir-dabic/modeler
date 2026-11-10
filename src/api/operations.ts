@@ -3,11 +3,13 @@ import { z } from 'zod';
 import { buildCutList } from '../model/cutlist';
 import { copyEntities } from '../model/editing';
 import { newId } from '../model/Document';
+import { DxfError, parseDxf } from '../model/dxf';
 import { exportStl, parseDocumentFile } from '../model/io';
+import { DRAWING_UNITS, DRAWING_UNIT_MM, localBounds, referenceMatrix } from '../model/references';
 import { cleanNumber, cleanVec, DEG, mirrorEntity, rotateEntityAbout } from '../model/geometry';
 import { commonParentGroup, groupChain, groupMembers } from '../model/groups';
 import { footprintMm2, solidVolumes } from '../model/quantities';
-import type { BoxEntity, CylinderEntity, Entity, ExtrusionEntity, Group, Vec3 as V3 } from '../model/types';
+import type { BoxEntity, CylinderEntity, DrawingGeometry, DrawingUnit, Entity, ExtrusionEntity, Group, ReferenceDrawing, Vec3 as V3 } from '../model/types';
 import {
   checkPrintFit,
   FILAMENTS,
@@ -18,7 +20,7 @@ import {
   WORKSPACE_IDS,
   WORKSPACES,
 } from '../model/workspaces';
-import { ApiError, boundsJson, boundsOf, entityLine, entitySummary, groupLine, OperationContext, r2, type FileHost, type ViewName } from './core';
+import { ApiError, boundsJson, boundsOf, entityLine, entitySummary, groupLine, OperationContext, r2, referenceLine, type FileHost, type ViewName } from './core';
 import { Axis, Color, Id, Num, Pattern, Positive, Rotation, Size3, Target, Vec2, Vec3, type PatternInput } from './schemas';
 
 /**
@@ -100,7 +102,7 @@ const getScene = def({
   name: 'get_scene',
   kind: 'read',
   description:
-    'Overview of the model: workspace, printer, overall bounds and the parts. detail "outline" lists each top-level group as one line (best first call on big models), "compact" (default) one line per part, "full" complete JSON. Lines read: id "name" shape size at x,y,z [hole] in "group".',
+    'Overview of the model: workspace, printer, overall bounds, the parts and any reference drawings (imported plans to build on; not parts). detail "outline" lists each top-level group as one line (best first call on big models), "compact" (default) one line per part, "full" complete JSON. Lines read: id "name" shape size at x,y,z [hole] in "group".',
   input: z.strictObject({
     detail: z.enum(['outline', 'compact', 'full']).optional(),
     include_hidden: z.boolean().optional(),
@@ -118,6 +120,7 @@ const getScene = def({
       bounds: solids.length ? boundsJson(boundsOf(solids)) : null,
     };
     if (ws.printPlate) scene.printer = { name: printerName(doc.printer), volume: printerVolume(doc.printer) };
+    if (doc.references.length) scene.references = doc.references.map((r) => referenceLine(r, doc));
     if (detail === 'full') {
       scene.parts = parts.map((e) => entitySummary(e, doc.groups));
       scene.groups = doc.groups.map((g) => ({ id: g.id, name: g.name, parent: g.parentId, parts: groupMembers(g.id, doc.entities, doc.groups).length }));
@@ -863,6 +866,185 @@ const exportStlOp = def({
   },
 });
 
+// ---- reference drawings (ADR 0014) ----------------------------------------------------------
+
+const DrawingUnitSchema = z.enum(DRAWING_UNITS as [DrawingUnit, ...DrawingUnit[]]);
+
+/** A hint when assumed units give an implausible size (a plan in metres read as mm…). */
+function unitsHint(sizeMm: number[]): string | undefined {
+  const big = Math.max(...sizeMm);
+  if (big < 50) return `The drawing is only ${r2(big)} mm across; it is probably in metres or inches. Fix it with update_reference { units }.`;
+  if (big > 2_000_000) return `The drawing is ${r2(big / 1_000_000)} km across; check its units with update_reference { units }.`;
+  return undefined;
+}
+
+function drawingSize(g: DrawingGeometry, units: DrawingUnit): number[] {
+  const b = localBounds(g);
+  const k = DRAWING_UNIT_MM[units];
+  return b ? [r2((b.max[0] - b.min[0]) * k), r2((b.max[1] - b.min[1]) * k)] : [0, 0];
+}
+
+const importDxf = def({
+  name: 'import_dxf',
+  kind: 'host',
+  description:
+    'Import a DXF drawing (e.g. a floor plan) as a reference drawing: lines on the ground (or at position) to build on and snap to. It is not part of the model (no cut list, export or holes). Give path (MCP: relative to the working folder) or text (the file contents). Units come from the file, else units, else mm. DWG is not supported: save as DXF first.',
+  input: z
+    .strictObject({
+      path: FilePath.optional().describe('A .dxf file'),
+      text: z.string().max(60_000_000).optional().describe('DXF contents (the app passes the picked file)'),
+      name: z.string().max(100).optional().describe('Default: the file name'),
+      units: DrawingUnitSchema.optional().describe('Units of the drawing when the file does not say (default mm), or to override it'),
+      position: Vec3.optional().describe('Where the drawing\'s lower-left corner goes (default 0,0,0)'),
+      rotation: Num.optional().describe('Rotation about Z in degrees'),
+    })
+    .refine((v) => (v.path ? 1 : 0) + (v.text !== undefined ? 1 : 0) === 1, 'give exactly one of path or text'),
+  async runAsync(ctx, input) {
+    const text = input.path ? await files(ctx).readText(input.path) : input.text!;
+    let parsed;
+    try {
+      parsed = parseDxf(text);
+    } catch (err) {
+      if (err instanceof DxfError) throw new ApiError('invalid_input', err.message);
+      throw err;
+    }
+    const fileName = input.path?.split(/[\\/]/).pop()?.replace(/\.dxf$/i, '');
+    const name = input.name?.trim() || fileName || ctx.doc.nextNameFor('Drawing');
+    const units = input.units ?? parsed.units ?? 'mm';
+    const ref: ReferenceDrawing = {
+      id: newId(),
+      name,
+      kind: 'drawing',
+      units,
+      position: cleanVec(vec(input.position ?? [0, 0, 0])),
+      rotation: cleanNumber(input.rotation ?? 0),
+      visible: true,
+      hiddenLayers: parsed.hiddenLayers,
+    };
+    ctx.doc.transact(() => ctx.doc.addReference(ref, parsed.geometry), `Import ${name}`);
+    const size = drawingSize(parsed.geometry, units);
+    const counts = new Map<number, number>();
+    for (const p of parsed.geometry.paths) counts.set(p.layer, (counts.get(p.layer) ?? 0) + 1);
+    const layers = parsed.geometry.layers.map((l, i) => `${l}: ${counts.get(i) ?? 0}${parsed.hiddenLayers.includes(l) ? ' (hidden)' : ''}`);
+    const hint = input.units || parsed.units ? undefined : unitsHint(size);
+    return {
+      id: ref.id,
+      name,
+      units,
+      units_from: input.units ? 'input' : parsed.units ? 'file' : 'assumed (the file does not say)',
+      size_mm: size,
+      layers: layers.length > 40 ? [...layers.slice(0, 40), `…and ${layers.length - 40} more`] : layers,
+      ...(Object.keys(parsed.skipped).length ? { skipped: parsed.skipped } : {}),
+      ...(hint ? { hint } : {}),
+    };
+  },
+});
+
+const getReference = def({
+  name: 'get_reference',
+  kind: 'read',
+  description:
+    'Read the lines of a reference drawing in world mm (units, position and rotation applied), to build on a plan, e.g. walls along its outlines. One line per path: "Walls: closed x,y x,y …", "Doors: arc centre x,y r R from x,y to x,y", "circle centre x,y ø D". Filter with layers; limit caps the paths (default 200).',
+  input: z.strictObject({
+    reference: Id.describe('Reference drawing id or exact name'),
+    layers: z.array(z.string()).optional().describe('Only these layers (default: the visible ones)'),
+    limit: z.int().min(1).max(2000).optional(),
+  }),
+  run(ctx, input) {
+    const r = ctx.reference(input.reference);
+    const g = ctx.doc.geometryOf(r.id);
+    if (!g) throw new ApiError('not_found', `"${r.name}" has no geometry`);
+    const m = referenceMatrix(r);
+    const k = DRAWING_UNIT_MM[r.units];
+    const w = ([x, y]: number[]) => {
+      const p = new THREE.Vector3(x, y, 0).applyMatrix4(m);
+      return `${r2(p.x)},${r2(p.y)}`;
+    };
+    const want = input.layers ? new Set(input.layers.map((l) => l.toLowerCase())) : null;
+    const hidden = new Set(r.hiddenLayers);
+    const counts = new Map<number, number>();
+    for (const p of g.paths) counts.set(p.layer, (counts.get(p.layer) ?? 0) + 1);
+    const limit = input.limit ?? 200;
+    const lines: string[] = [];
+    let total = 0;
+    for (const p of g.paths) {
+      const layer = g.layers[p.layer];
+      if (want ? !want.has(layer.toLowerCase()) : hidden.has(layer)) continue;
+      total++;
+      if (lines.length >= limit) continue;
+      if (p.center) {
+        const radius = Math.hypot(p.points[0][0] - p.center[0], p.points[0][1] - p.center[1]) * k;
+        lines.push(
+          p.closed
+            ? `${layer}: circle centre ${w(p.center)} ø${r2(radius * 2)}`
+            : `${layer}: arc centre ${w(p.center)} r ${r2(radius)} from ${w(p.points[0])} to ${w(p.points[p.points.length - 1])}`,
+        );
+      } else {
+        lines.push(`${layer}: ${p.closed ? 'closed ' : ''}${p.points.map(w).join(' ')}`);
+      }
+    }
+    return {
+      reference: referenceLine(r, ctx.doc),
+      layers: g.layers.map((l, i) => `${l}: ${counts.get(i) ?? 0}${hidden.has(l) ? ' (hidden)' : ''}`),
+      paths: lines,
+      ...(total > lines.length ? { truncated: `${total - lines.length} more paths; filter by layers or raise limit` } : {}),
+    };
+  },
+});
+
+const updateReference = def({
+  name: 'update_reference',
+  kind: 'write',
+  description:
+    'Change a reference drawing: name, units (rescales it), position, rotation (about Z, degrees), visible, or switch layers off/on by name ("*" = all). Reference drawings are listed in get_scene.',
+  input: z.strictObject({
+    reference: Id.describe('Reference drawing id or exact name'),
+    name: z.string().min(1).max(100).optional(),
+    units: DrawingUnitSchema.optional(),
+    position: Vec3.optional(),
+    rotation: Num.optional(),
+    visible: z.boolean().optional(),
+    hide_layers: z.array(z.string()).optional(),
+    show_layers: z.array(z.string()).optional().describe('Applied after hide_layers'),
+  }),
+  run(ctx, input) {
+    const r = ctx.reference(input.reference);
+    const layers = ctx.doc.geometryOf(r.id)?.layers ?? [];
+    const expand = (names: string[]) => {
+      if (names.includes('*')) return layers;
+      const lower = new Map(layers.map((l) => [l.toLowerCase(), l]));
+      return names.map((n) => {
+        const l = lower.get(n.toLowerCase());
+        if (!l) throw new ApiError('not_found', `"${r.name}" has no layer "${n}"`, `Layers: ${layers.slice(0, 40).join(', ')}`);
+        return l;
+      });
+    };
+    const hide = input.hide_layers ? expand(input.hide_layers) : [];
+    const show = new Set(input.show_layers ? expand(input.show_layers) : []);
+    ctx.doc.updateReference(r.id, (x) => {
+      if (input.name) x.name = input.name.trim();
+      if (input.units) x.units = input.units;
+      if (input.position) x.position = cleanVec(vec(input.position));
+      if (input.rotation !== undefined) x.rotation = cleanNumber(input.rotation);
+      if (input.visible !== undefined) x.visible = input.visible;
+      if (hide.length || show.size) x.hiddenLayers = [...new Set([...x.hiddenLayers, ...hide])].filter((l) => !show.has(l));
+    });
+    return { ids: [], reference: referenceLine(ctx.doc.getReference(r.id)!, ctx.doc) };
+  },
+});
+
+const deleteReference = def({
+  name: 'delete_reference',
+  kind: 'write',
+  description: 'Remove a reference drawing (the model is not affected).',
+  input: z.strictObject({ reference: Id.describe('Reference drawing id or exact name') }),
+  run(ctx, input) {
+    const r = ctx.reference(input.reference);
+    ctx.doc.removeReference(r.id);
+    return { ids: [], removed: `${r.id} "${r.name}"` };
+  },
+});
+
 /** All operations except apply_operations (which ModelerApi provides, as it needs the executor). */
 export const OPERATIONS: OperationDef<any>[] = [
   getScene,
@@ -901,4 +1083,8 @@ export const OPERATIONS: OperationDef<any>[] = [
   openFile,
   saveFile,
   exportStlOp,
+  importDxf,
+  getReference,
+  updateReference,
+  deleteReference,
 ];

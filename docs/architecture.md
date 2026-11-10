@@ -68,9 +68,17 @@ All kinds share `id`, `name`, `position` (world mm), `rotation` (Euler XYZ, degr
 
 Selection works SketchUp-style. A click selects the outermost group. `doc.openGroupId` is the group open for editing: clicks pick parts inside it, and the viewport fades everything else. It's UI state, not saved and not undoable.
 
+### Reference drawings ([ADR 0014](adr/0014-exchange-formats-and-reference-drawings.md))
+
+Imported plans (DXF) to trace and snap to. They are **not part of the model**: no selection, CSG, cut list, volumes, print checks or export.
+- `doc.references` holds the metadata: `{ id, name, kind: 'drawing', units, position, rotation (about Z), visible, hiddenLayers }`. It's snapshotted, so changes are undoable.
+- The line geometry `{ layers, paths }` is immutable and kept beside it (`doc.geometryOf(id)`), **outside undo snapshots**, so a big plan isn't copied into every undo step.
+- `src/model/dxf.ts` parses ASCII DXF into that geometry. `src/model/references.ts` has the placement matrix (`referenceMatrix`: drawing units → mm, rotate, translate), bounds, snap points and file validation.
+- The viewport draws each drawing as one `LineSegments` (rebuilt only when layers change; placement is a matrix). The snapper adds its corners, segment midpoints and arc/circle centres.
+
 ### Document and transactions ([ADR 0002](adr/0002-document-transactions-snapshot-undo.md))
 
-`ModelDocument` (`src/model/Document.ts`) owns `entities`, `groups`, `selection`, `openGroupId`, `units` and document settings (`workspace`, `printer`).
+`ModelDocument` (`src/model/Document.ts`) owns `entities`, `groups`, `references` (+ their geometry), `selection`, `openGroupId`, `units` and document settings (`workspace`, `printer`).
 
 - `begin()` → mutations → `commit()` records **one undo step** (a JSON snapshot); `cancel()` rolls back. `transact(fn)` wraps a function, joining an open transaction if there is one.
 - Every mutation emits `onChange({committed})`. `committed: false` during a drag, so the viewport updates live; `true` on commit, which triggers autosave.
@@ -111,7 +119,8 @@ Scene helpers:
 | What | Where | Key / format |
 |---|---|---|
 | Model (autosave) | `localStorage` | `modeler.autosave.v1`, a `DocumentFile` |
-| Project file | download / open / drag-drop | `*.modeler.json`: `{format: 'modeler', version: 1, units, workspace, printer, entities, groups}` |
+| Project file | download / open / drag-drop | `*.modeler.json`: `{format: 'modeler', version: 1, units, workspace, printer, entities, groups, references?}`; each reference carries its `geometry` |
+| Reference drawing source | import / drag-drop | `*.dxf` (ASCII), converted on import; the DXF itself isn't kept |
 | App settings (snap per workspace, cut preview, filament) | `localStorage` | `modeler.settings.v1` |
 | Shortcut overrides, hold keys | `localStorage` | `modeler.keymap.v1` |
 | Last sidebar tab | `localStorage` | `modeler.sidebarTab` |
@@ -119,7 +128,10 @@ Scene helpers:
 Loading is defensive (`parseDocumentFile`):
 - invalid entities are dropped and duplicate ids re-issued;
 - references to missing groups are removed, and empty groups pruned;
-- unknown workspaces or printers fall back to defaults.
+- unknown workspaces or printers fall back to defaults;
+- malformed reference drawings or paths are dropped.
+
+If the autosave doesn't fit in `localStorage` (a large reference drawing), it is saved without reference drawings and the user is told once to save the project.
 
 ## Invariants
 
@@ -131,6 +143,7 @@ These must hold after every committed change. The Modeler API enforces them in `
 4. One user action, or one AI turn, is **one undo step**.
 5. The model layer (`src/model`) never imports from `viewport`, `ui`, `tools`, `api` or the DOM, and `src/api` imports only `src/model`.
 6. Every group has at least one member (directly or through subgroups); `groupId` / `parentId` never point at missing groups.
+7. Reference drawings never affect the model: tools, CSG, cut lists, quantities and exports read `doc.entities` only.
 
 ## Module map
 
@@ -160,6 +173,8 @@ src/
     units.ts            parse/format lengths and angles
     cutlist.ts          cut list grouping + CSV
     io.ts               file parse/validate, STL export, autosave, settings
+    dxf.ts              ASCII DXF → reference-drawing geometry (blocks, bulges, OCS)
+    references.ts       reference drawings: placement matrix, bounds, snap points, validation
     workspaces.ts       workspace configs, printers, fit check, volume
   viewport/           Three.js rendering + picking
     Viewport.ts         scene, cameras, zoom, entity→mesh sync, styles, picking, highlights

@@ -114,6 +114,24 @@ Press `?` (or the keyboard button, top right) for the full list.
 
 Customisations are saved in the browser.
 
+## Reference drawings (DXF import)
+
+Build on top of an existing plan, e.g. an architect's floor plan or a kitchen layout:
+
+1. Click the **plan** button in the top bar (*Import DXF*), or drop a `.dxf` file on the window.
+2. The drawing appears on the ground as thin purple lines, and the view zooms to it. The toast shows its size. Check it: if the file doesn't say its units, it is read as mm.
+3. Draw on it. Corners, midpoints, and arc/circle centres of the drawing are snap points, so a box clicked from one cabinet corner to the opposite one matches the plan exactly.
+
+In **Objects → Reference drawings**:
+- the eye hides the drawing, the bin removes it;
+- click the drawing to open it: **Drawn in** changes its units (mm, cm, m, in, ft), and each layer has its own eye;
+- layers that were off or frozen in the CAD file start hidden;
+- double-click zooms to the drawing.
+
+Everything here is undoable. Reference drawings are saved in the project file, but they are **not part of the model**: they're never selected, cut, exported, or counted in cut lists or volumes.
+
+Supported: lines, polylines (including arcs), circles, arcs, ellipses, splines, solids, and blocks (including nested, scaled, rotated and arrayed). Text, hatches and dimensions are skipped. **DWG files:** save as DXF in your CAD program, or convert with the free *ODA File Converter*.
+
 ## AI (Connect AI)
 
 Claude can build and edit your model through the **modeler MCP server** (setup: [mcp/README.md](../mcp/README.md)).
@@ -121,6 +139,8 @@ Claude can build and edit your model through the **modeler MCP server** (setup: 
 1. Add the server to Claude Code or Claude Desktop (one-time).
 2. Click **Connect AI** in the top bar. The button pulses (*Waiting for AI…*) until the server is running, then turns green (*AI connected*).
 3. Ask Claude, e.g. *"build a bookcase with 4 shelves"* or *"add M3 screw holes in the corners of the selected part"*.
+
+Claude can also import a DXF from its working folder and read the drawing's lines, e.g. *"import kitchen.dxf and put 600 mm base cabinets along the back wall"*.
 
 Each AI change shows briefly at the bottom (*AI: Bookcase*) and is a normal undo step, so `⌘/Ctrl+Z` takes back exactly one AI action. Claude sees your selection and can render views of the model to check its work. Click the button again to disconnect. Only one tab can be connected; connecting another one takes over.
 

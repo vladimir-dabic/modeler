@@ -12,7 +12,9 @@ import type { NodeFileHost } from './files';
 export const SERVER_VERSION = '0.1.0';
 
 /** Operations that run in Node even in live mode (they touch files; the tab never does). */
-const FILE_OPS = new Set(['open_file', 'save_file', 'export_stl']);
+const FILE_OPS = new Set(['open_file', 'save_file', 'export_stl', 'import_dxf']);
+/** File operations that change the model: in live mode their result is pushed to the tab. */
+const PUSH_BACK = new Set(['open_file', 'import_dxf']);
 
 const STATUS_TOOL = {
   name: 'connection_status',
@@ -68,7 +70,7 @@ export function createModelerServer(opts: ModelerServerOptions) {
       scratch.doc.setSelection(selection);
     }
     const result = await scratch.callAsync(name, input, { source: 'mcp', label });
-    if (name === 'open_file' && result.ok) {
+    if (PUSH_BACK.has(name) && result.ok) {
       const pushed = await bridge!.loadFile(scratch.doc.toFile(), label);
       if (!pushed.ok) return pushed;
     }
@@ -89,7 +91,11 @@ export function createModelerServer(opts: ModelerServerOptions) {
       };
     }
     const label = labelFor(name, input);
-    if (FILE_OPS.has(name)) return fileOp(name, input, name === 'open_file' ? `AI: Open ${(input as { path?: string })?.path ?? 'file'}` : label);
+    const path = (input as { path?: unknown })?.path;
+    if (FILE_OPS.has(name)) {
+      const verb = name === 'open_file' ? 'Open' : name === 'import_dxf' ? 'Import' : '';
+      return fileOp(name, input, verb && typeof path === 'string' ? `AI: ${verb} ${path}` : label);
+    }
     if (live()) return bridge!.call(name, input, label);
     const result = await local.callAsync(name, input, { source: 'mcp', label });
     const kind = kinds.get(name);

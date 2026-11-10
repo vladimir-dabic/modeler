@@ -4,7 +4,8 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { buildWorldGeometries } from './csg';
 import { newId } from './Document';
 import { pruneGroups } from './groups';
-import type { DocumentFile, Entity, Group, Unit, Vec2, Vec3 } from './types';
+import { parseReferenceFile } from './references';
+import type { DocumentFile, Entity, Group, ReferenceFile, Unit, Vec2, Vec3 } from './types';
 import { DEFAULT_PRINTER_SETTING, isWorkspaceId, PRINTERS, type PrinterSetting, type WorkspaceId } from './workspaces';
 
 const UNITS: Unit[] = ['mm', 'cm', 'm', 'in'];
@@ -69,6 +70,14 @@ export function parseDocumentFile(text: string): DocumentFile {
     });
   }
   for (const e of entities) if (e.groupId && !groupIds.has(e.groupId)) delete e.groupId;
+  const references: ReferenceFile[] = [];
+  for (const item of Array.isArray(raw.references) ? raw.references : []) {
+    const r = parseReferenceFile(item, newId);
+    if (!r) continue;
+    if (seen.has(r.id)) r.id = newId();
+    seen.add(r.id);
+    references.push(r);
+  }
   return {
     format: 'modeler',
     version: 1,
@@ -77,6 +86,7 @@ export function parseDocumentFile(text: string): DocumentFile {
     printer: parsePrinter(raw.printer),
     entities,
     groups: pruneGroups(entities, groups),
+    ...(references.length ? { references } : {}),
   };
 }
 
@@ -131,11 +141,23 @@ export function exportStl(targets: Entity[], all: Entity[]): ArrayBuffer | null 
 const AUTOSAVE_KEY = 'modeler.autosave.v1';
 const SETTINGS_KEY = 'modeler.settings.v1';
 
-export function saveAutosave(file: DocumentFile): void {
+/**
+ * Best-effort autosave. If the file is over the storage quota (usually a large reference
+ * drawing), the model is saved without reference drawings and 'partial' is returned.
+ */
+export function saveAutosave(file: DocumentFile): 'ok' | 'partial' | 'failed' {
   try {
     localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(file));
+    return 'ok';
   } catch {
-    // Storage may be unavailable (private mode, quota); autosave is best-effort.
+    // Storage may be unavailable (private mode) or full.
+  }
+  if (!file.references?.length) return 'failed';
+  try {
+    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ ...file, references: [] }));
+    return 'partial';
+  } catch {
+    return 'failed';
   }
 }
 

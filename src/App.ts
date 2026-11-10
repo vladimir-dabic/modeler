@@ -115,6 +115,7 @@ export class App {
   private fileName = 'model';
   private defaultColor = '#d4dae3';
   private autosaveTimer = 0;
+  private warnedAutosave = false;
   /**
    * Holding the pan/orbit key (Shift / Alt by default) turns the left button into
    * pan/orbit without switching tools, so an operation in progress survives.
@@ -174,6 +175,7 @@ export class App {
       h('div', { class: 'tb-group' },
         btn('new', 'New model', 'file.new'),
         btn('open', 'Open project…', 'file.open'),
+        btn('drawing', 'Import a DXF drawing (e.g. a floor plan) to build on and snap to', 'file.importDxf'),
         btn('save', 'Save project', 'file.save'),
         btn('export', 'Export STL for 3D printing (selection, or everything)', 'file.exportStl', 'STL'),
       ),
@@ -259,6 +261,7 @@ export class App {
       duplicateSelection: () => this.duplicateSelection(),
       deleteSelection: () => this.deleteSelection(),
       zoomTo: (ids) => this.viewport.zoomExtents(ids.map((id) => this.doc.get(id)).filter(Boolean) as Entity[]),
+      zoomToReference: (id) => this.viewport.fitBox(this.viewport.referencesBox([id])),
       exportCutList: () => this.exportCutList(),
       setDefaultColor: (c) => (this.defaultColor = c),
       keyLabel: (command) => this.keymap.label(command),
@@ -311,7 +314,7 @@ export class App {
         this.showSnapStep();
         this.sidebar.render(true);
       }
-      saveAutosave(this.doc.toFile());
+      this.autosave();
     });
 
     this.bindSettings();
@@ -425,7 +428,15 @@ export class App {
 
   private scheduleAutosave() {
     clearTimeout(this.autosaveTimer);
-    this.autosaveTimer = window.setTimeout(() => saveAutosave(this.doc.toFile()), 300);
+    this.autosaveTimer = window.setTimeout(() => this.autosave(), 300);
+  }
+
+  private autosave() {
+    const status = saveAutosave(this.doc.toFile());
+    if (status === 'partial' && !this.warnedAutosave) {
+      this.warnedAutosave = true;
+      this.toast('The reference drawing is too large for the browser autosave. Save the project to keep it.');
+    }
   }
 
   private updateChrome() {
@@ -654,6 +665,7 @@ export class App {
       'file.open': () => void this.open(),
       'file.save': () => this.save(),
       'file.exportStl': () => this.exportStl(),
+      'file.importDxf': () => void this.importDxf(),
       'file.exportCutList': () => this.exportCutList(),
       'help.shortcuts': () => this.shortcuts.toggle(),
       'ai.connect': () => (this.bridge.status === 'off' ? this.bridge.start() : this.bridge.stop('AI disconnected')),
@@ -820,7 +832,8 @@ export class App {
     window.addEventListener('drop', (e) => {
       e.preventDefault();
       const file = e.dataTransfer?.files?.[0];
-      if (file) void this.openFile(file);
+      if (file && /\.(dxf|dwg)$/i.test(file.name)) void this.importDxf(file);
+      else if (file) void this.openFile(file);
     });
   }
 
@@ -893,6 +906,24 @@ export class App {
     } catch (err) {
       this.toast(`Couldn’t open ${file.name}: ${(err as Error).message}`);
     }
+  }
+
+  /** Import a DXF as a reference drawing (ADR 0014), then show it. */
+  private async importDxf(file?: File | null) {
+    file ??= await pickFile('.dxf');
+    if (!file) return;
+    this.active.cancel();
+    const result = await this.api.callAsync('import_dxf', { text: await file.text(), name: file.name.replace(/\.(dxf|dwg)$/i, '') }, { source: 'ui' });
+    if (!result.ok) {
+      this.toast(result.error.hint ? `${result.error.message} — ${result.error.hint}` : result.error.message);
+      return;
+    }
+    const d = result.data as { id: string; name: string; units: string; units_from: string; size_mm: number[]; hint?: string };
+    this.viewport.fitBox(this.viewport.referencesBox([d.id]));
+    if (this.workspace.panels.includes('objects')) this.sidebar.setTab('objects');
+    const size = d.size_mm.map((v) => formatLength(v, this.doc.units)).join(' × ');
+    const assumed = d.units_from.startsWith('assumed') ? ` The file has no units; read as ${d.units}.` : '';
+    this.toast(d.hint ?? `Imported ${d.name}: ${size}.${assumed} Change units or layers under Objects.`);
   }
 
   private save() {
