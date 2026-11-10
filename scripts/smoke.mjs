@@ -1,7 +1,12 @@
 // End-to-end smoke test: drives the real UI in headless Chrome with mouse + keyboard.
 // Usage: npm run dev (in another terminal), then `npm run smoke` (screenshots → test-results/)
 // or `node scripts/smoke.mjs <screenshot-dir>`.
-import { mkdirSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { chromium } from 'playwright-core';
 
 const URL = process.env.MODELER_URL ?? 'http://localhost:5173/';
@@ -317,7 +322,88 @@ check('autosave restored after reload', ents.length >= 6, `${ents.length} entiti
   await page.click('.ws-btn:has-text("Print")');
 }
 
-// 15. Scroll-zooming toward the floor never takes the camera underneath it
+// 15. Groups, right-click menu, Modeler API in the browser
+{
+  await page.keyboard.press('Escape');
+  await page.click('.ws-btn:has-text("Workshop")');
+  await page.evaluate(() => {
+    const { api, doc } = window.modeler;
+    doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, false);
+    api.call('add_box', { name: 'Front', position: [0, 0, 0], size: [400, 18, 150] });
+    api.call('add_box', { name: 'Back', position: [0, 300, 0], size: [400, 18, 150] });
+    window.modeler.viewport.setView('iso');
+    window.modeler.viewport.zoomExtents();
+  });
+  await page.keyboard.press(' ');
+  await clickWorld(200, 0, 75);
+  await page.keyboard.down('Meta');
+  await clickWorld(200, 300, 140);
+  await page.keyboard.up('Meta');
+  await page.keyboard.press('Meta+g');
+  check('⌘G groups the selection', await page.evaluate(() => window.modeler.doc.groups.length === 1));
+  await page.keyboard.press('Escape');
+  await clickWorld(200, 0, 75);
+  check('clicking a grouped part selects the whole group', await page.evaluate(() => window.modeler.doc.selection.size === 2));
+  check('properties show the group', /Group · 2 parts/.test((await page.textContent('.sidebar-body')) ?? ''));
+
+  const front = await screen(200, 0, 75);
+  await page.mouse.dblclick(front.x, front.y);
+  check('double-click opens the group', await page.isVisible('.group-badge'));
+  check('…and selects just that part', await page.evaluate(() => window.modeler.doc.selection.size === 1));
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
+  check('Esc, Esc closes the group', !(await page.isVisible('.group-badge')));
+
+  // Right-click a part → context menu
+  await page.mouse.click(front.x, front.y, { button: 'right' });
+  check('right-click opens the menu', await page.isVisible('.context-menu'));
+  const items = await page.$$eval('.cm-item span', (els) => els.map((e) => e.textContent));
+  check('menu has group actions', items.includes('Ungroup') && items.includes('Duplicate') && items.includes('Delete'), items.join(', '));
+  await page.click('.cm-item:has-text("Duplicate")');
+  const after = await page.evaluate(() => ({ groups: window.modeler.doc.groups.map((g) => g.name), parts: window.modeler.doc.entities.length }));
+  check('Duplicate from the menu copies the group as a new group', after.parts === 4 && after.groups.join() === 'Group 1,Group 2', JSON.stringify(after));
+
+  // Right-click empty space
+  await page.mouse.click(80, 820, { button: 'right' });
+  const emptyItems = await page.$$eval('.cm-item span', (els) => els.map((e) => e.textContent));
+  check('empty-space menu offers Select all', emptyItems.includes('Select all'), emptyItems.join(', '));
+  await page.keyboard.press('Escape');
+  check('Esc closes the menu', !(await page.isVisible('.context-menu')));
+
+  // Right-drag still pans, without a menu
+  const t0 = await page.evaluate(() => window.modeler.viewport.controls.target.toArray());
+  await page.mouse.move(700, 500);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(780, 540, { steps: 6 });
+  await page.mouse.up({ button: 'right' });
+  const t1 = await page.evaluate(() => window.modeler.viewport.controls.target.toArray());
+  check('right-drag pans (no menu)', Math.hypot(...t1.map((v, i) => v - t0[i])) > 5 && !(await page.isVisible('.context-menu')));
+
+  // Objects tree
+  await page.click('.tab:has-text("Objects")');
+  check('Objects tab shows groups as tree rows', (await page.$$('.outliner-item.group')).length === 2);
+  await page.click('.tab:has-text("Properties")');
+
+  // The API in the browser: an AI-style batch, undo as one step, and rendered views.
+  const batch = await page.evaluate(() => {
+    const r = window.modeler.api.call('apply_operations', { operations: [
+      { name: 'add_box', as: 'b', input: { name: 'Plinth', position: [0, 600, 0], size: [400, 300, 60] } },
+      { name: 'duplicate', input: { target: { ids: ['$b'] }, pattern: { linear: { count: 3, step: [450, 0, 0] } } } },
+    ] }, { source: 'test', label: 'AI: plinths' });
+    return { ok: r.ok, parts: window.modeler.doc.entities.length, label: window.modeler.doc.undoLabel };
+  });
+  check('API batch runs in the app as one labelled step', batch.ok && batch.parts === 7 && batch.label === 'AI: plinths', JSON.stringify(batch));
+  await page.keyboard.press('Meta+z');
+  check('one undo removes the whole batch', await page.evaluate(() => window.modeler.doc.entities.length === 4));
+  const views = await page.evaluate(async () => {
+    const r = await window.modeler.api.callAsync('render_views', { views: ['iso', 'top'], size: 256 });
+    return r.ok ? r.data.images.map((i) => i.png.length) : r.error;
+  });
+  check('render_views returns PNG images', Array.isArray(views) && views.length === 2 && views.every((n) => n > 1000), JSON.stringify(views));
+  await page.evaluate(() => window.modeler.doc.clearSelection());
+}
+
+// 16. Scroll-zooming toward the floor never takes the camera underneath it
 await page.evaluate(() => { window.modeler.viewport.setView('iso'); window.modeler.viewport.zoomExtents(); });
 const floor = await screen(900, -300, 0);
 await page.mouse.move(floor.x, floor.y);
@@ -336,6 +422,46 @@ await page.evaluate(() => {
 });
 await page.waitForTimeout(300);
 await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
+
+// 17. MCP live bridge: the built server (over stdio, as Claude runs it) drives a second tab.
+{
+  execSync('node mcp/build.mjs', { stdio: 'ignore' });
+  const port = 48000 + Math.floor(Math.random() * 1000);
+  const root = mkdtempSync(join(tmpdir(), 'modeler-smoke-'));
+  const mcp = new Client({ name: 'smoke', version: '1' });
+  await mcp.connect(new StdioClientTransport({ command: 'node', args: ['mcp/dist/modeler-mcp.mjs', '--root', root, '--port', String(port)], stderr: 'ignore' }));
+  const call = async (name, args = {}) => {
+    const r = await mcp.callTool({ name, arguments: args });
+    return { ...JSON.parse(r.content[0].text), content: r.content };
+  };
+  const tab = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+  tab.on('pageerror', (e) => errors.push(`bridge tab pageerror: ${e.message}`));
+  await tab.goto(`${URL}?aiPort=${port}`);
+  await tab.waitForFunction(() => window.modeler);
+  await tab.evaluate(() => window.modeler.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true));
+  await tab.click('.ai-btn');
+  await tab.waitForFunction(() => window.modeler.bridge.status === 'connected', null, { timeout: 5000 }).catch(() => {});
+  check('Connect AI links the tab to the MCP server', (await tab.textContent('.ai-btn')).includes('AI connected') && (await call('connection_status')).data?.mode === 'live');
+  const built = await call('apply_operations', {
+    label: 'box with holes',
+    operations: [
+      { name: 'add_box', input: { name: 'Body', size: [60, 40, 20] } },
+      { name: 'add_cylinder', input: { name: 'M3', radius: 1.6, height: 30, position: [6, 6, -5], hole: true } },
+    ],
+  });
+  const state = await tab.evaluate(() => ({ n: window.modeler.doc.entities.length, label: window.modeler.doc.undoLabel }));
+  check('MCP batch appears in the tab as one AI undo step', built.ok && state.n === 2 && state.label === 'AI: Box with holes', JSON.stringify(state));
+  const images = (await call('render_views', { views: ['iso'], size: 256 })).content.filter((c) => c.type === 'image');
+  check('render_views over MCP returns an image', images.length === 1 && images[0].data.length > 1000);
+  const stl = await call('export_stl', { path: 'body.stl' });
+  check('export_stl writes the tab\'s model from Node', stl.ok && stl.data.triangles > 12, JSON.stringify(stl));
+  await tab.screenshot({ path: `${outDir}/modeler-mcp-bridge.png` });
+  await tab.click('.ai-btn');
+  check('clicking again disconnects', (await tab.evaluate(() => window.modeler.bridge.status)) === 'off');
+  await mcp.close();
+  await tab.close();
+  rmSync(root, { recursive: true, force: true });
+}
 
 check('no console errors', errors.length === 0, errors.join('\n'));
 await browser.close();

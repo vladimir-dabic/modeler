@@ -25,10 +25,14 @@ const PATHS: Record<string, string> = {
   ground: 'M4 20h16 M12 4v11 M8 11l4 4 4-4',
   hole: 'M12 3a9 9 0 110 18 9 9 0 010-18z M12 8.5a3.5 3.5 0 110 7 3.5 3.5 0 010-7z',
   shape: 'M4 18l3-12 7 3 6-4-2 13z',
+  ai: 'M10 3l1.8 5.2L17 10l-5.2 1.8L10 17l-1.8-5.2L3 10l5.2-1.8z M18 14l.9 2.1L21 17l-2.1.9L18 20l-.9-2.1L15 17l2.1-.9z',
   keyboard: 'M3 6h18v12H3z M7 10h.01 M11 10h.01 M15 10h.01 M19 10h.01 M7 14h10',
   print: 'M6 3h12v5H6z M4 8h16v9H4z M7 17v4h10v-4 M9 12h6 M17 11h.01',
   saw: 'M3 15l12-12 6 6-12 12z M6 12l1.5 1.5 M9 9l1.5 1.5 M12 6l1.5 1.5 M15 15l3 3',
   house: 'M3 11l9-7 9 7 M5 9.5V20h14V9.5 M10 20v-6h4v6',
+  group: 'M3 7V4h3 M18 4h3v3 M21 17v3h-3 M6 20H3v-3 M7 8h6v6H7z M11 11h6v6h-6z',
+  ungroup: 'M4 4h7v7H4z M13 13h7v7h-7z M14 7h3v3 M7 14v3h3',
+  openGroup: 'M4 6h6l2 2h8v10H4z M12 13h5 M15 11l2 2-2 2',
   help: 'M12 3a9 9 0 110 18 9 9 0 010-18z M9.5 9.5a2.5 2.5 0 015 .5c0 1.7-2.5 2-2.5 3.5 M12 17v.01',
 };
 

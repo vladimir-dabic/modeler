@@ -11,9 +11,9 @@ flowchart TB
     Chat["In-app AI assistant (planned)"]
     MCP["MCP server (planned)"]
   end
-  API["Modeler API: typed, validated operations (planned, ADR 0008)"]
+  API["Modeler API: src/api, typed and validated operations (ADR 0008)"]
   subgraph Model["Model layer: src/model, DOM-free, runs in Node"]
-    Doc["ModelDocument: entities, selection, transactions, undo"]
+    Doc["ModelDocument: entities, groups, selection, transactions, undo"]
     Geo["geometry / csg / units / cutlist / workspaces / io"]
   end
   subgraph View["View layer: src/viewport"]
@@ -33,17 +33,16 @@ flowchart TB
 
 **Rule of thumb:** the model layer knows nothing about the screen. The view layer renders the model and answers "what's under the cursor?". Clients change the model only through the API ([ADR 0008](adr/0008-modeler-api-single-entry-point.md)).
 
-### Current state vs target
+### Who changes the model, and how
 
-The Modeler API layer is **designed but not yet extracted** ([modeler-api.md](modeler-api.md)). Today the clients reach the document directly:
+| Who | How |
+|---|---|
+| Sidebar, commands, right-click menu (`src/ui`, `App.runCommand`) | Modeler API operations via `App.uiCall` (errors become toasts with the API's hint) |
+| Workspace / printer switches | API `set_workspace` / `set_printer`; the app reacts to `doc.onSettingsChange`, so an AI switch updates the UI the same way |
+| Interactive tools (`src/tools`) | mutate entities inside `doc.begin()` … `doc.commit()` for live previews (ADR 0004); copying uses the shared `copyEntities` (`src/model/editing.ts`) |
+| Future AI assistant / MCP | Modeler API, as tools |
 
-| Who | How it changes the model today | Target |
-|---|---|---|
-| Interactive tools (`src/tools`) | mutate the entity inside `doc.begin()` … `doc.commit()`, calling `doc.touch()` for live preview | unchanged for the live drag; the final state must pass the same validation as the API |
-| Sidebar (`src/ui/Sidebar.ts`) | `doc.transact(() => doc.update(...))` | call API operations (`update_entity`, `set_hole`, …) |
-| Commands (`App.runCommand`) | mix of document edits and UI actions | document edits → API; UI-only actions (dialogs, toasts, camera) stay in `App` |
-
-Extracting this layer is the first step of the AI work ([roadmap](roadmap.md)).
+**Remaining gap:** tool commits aren't yet run through the API's `validateEntity`.
 
 ## Key concepts
 
@@ -57,15 +56,27 @@ Extracting this layer is the first step of the AI work ([roadmap](roadmap.md)).
 | `cylinder` | `radius`, `height`, `segments` | base centre at the origin, extends +Z |
 | `extrusion` | `points: [x, y][]`, `height` | closed outline on local XY, extruded +Z |
 
-All kinds share `id`, `name`, `position` (world mm), `rotation` (Euler XYZ, degrees), `color`, `hole`, `visible`. World units: **mm, Z-up** (X red, Y green, Z blue).
+All kinds share `id`, `name`, `position` (world mm), `rotation` (Euler XYZ, degrees), `color`, `hole`, `visible`, and an optional `groupId`. World units: **mm, Z-up** (X red, Y green, Z blue).
+
+### Groups ([ADR 0011](adr/0011-groups-as-flat-membership.md))
+
+`doc.groups` is a list of `{ id, name, parentId? }`, and an entity names its group with `groupId`. Groups have **no transform**; members keep world positions, so geometry, snapping, CSG and export are unaffected. Pure helpers live in `src/model/groups.ts`:
+- `groupMembers`, `groupChain` (nesting);
+- `selectionUnit`: what a click selects;
+- `groupForSelection`;
+- `pruneGroups`: groups left empty disappear on every write.
+
+Selection works SketchUp-style. A click selects the outermost group. `doc.openGroupId` is the group open for editing: clicks pick parts inside it, and the viewport fades everything else. It's UI state, not saved and not undoable.
 
 ### Document and transactions ([ADR 0002](adr/0002-document-transactions-snapshot-undo.md))
 
-`ModelDocument` (`src/model/Document.ts`) owns `entities`, `selection`, `units` and document settings (`workspace`, `printer`).
+`ModelDocument` (`src/model/Document.ts`) owns `entities`, `groups`, `selection`, `openGroupId`, `units` and document settings (`workspace`, `printer`).
 
 - `begin()` → mutations → `commit()` records **one undo step** (a JSON snapshot); `cancel()` rolls back. `transact(fn)` wraps a function, joining an open transaction if there is one.
 - Every mutation emits `onChange({committed})`. `committed: false` during a drag, so the viewport updates live; `true` on commit, which triggers autosave.
 - `version` increments on every change. It's the cache key for derived data (snap points, volumes).
+- `commit(label)` names the undo step (`undoLabel`). `checkpoint()` / `rollback()` let the API undo a failed batch even inside an outer transaction.
+- Settings changes (`setUnits`, `setWorkspace`, `setPrinter`) emit `onSettingsChange`.
 - Undo history holds up to 200 steps. `workspace`, `printer` and `units` are document settings, **not** part of undo.
 
 ### Rendering
@@ -88,6 +99,7 @@ Scene helpers:
 - **Tools** ([ADR 0004](adr/0004-tools-edit-live-entities.md)): `src/tools/*`. Each tool is a small state machine (`idle → rect → height`, …). It receives pointer events, key presses and typed values from the measurement box. Drawing tools add a real entity at the first click and update it live, so the preview *is* the result.
 - **Snapper:** `src/viewport/Snapper.ts` turns a cursor position into a 3D point. Priority: snap points within 14 px (corners > centres > midpoints), then faces, then the ground; free positions are rounded to the snap step.
 - **Commands and keymap** ([ADR 0006](adr/0006-command-registry-and-keymap.md)): `commands.ts` lists every bindable action and `keymap.ts` maps keys to command ids. User overrides live in `localStorage`. `App.runCommand(id)` executes them, and the toolbar buttons go through the same function.
+- **Right-click menu** ([ADR 0012](adr/0012-context-menu-from-commands.md)): `src/ui/ContextMenu.ts`. A right-click without a drag opens it (a right-drag pans). Its items are commands, built in `App.menuItems`, so each shows its current shortcut.
 - **Hold-to-navigate:** holding the pan/orbit key gives the left mouse button to `OrbitControls` without switching tools, so an operation in progress survives. A quick tap of the same key is forwarded to the tool as a key press.
 
 ### Workspaces ([ADR 0007](adr/0007-workspaces-are-configuration.md))
@@ -99,34 +111,50 @@ Scene helpers:
 | What | Where | Key / format |
 |---|---|---|
 | Model (autosave) | `localStorage` | `modeler.autosave.v1`, a `DocumentFile` |
-| Project file | download / open / drag-drop | `*.modeler.json`: `{format: 'modeler', version: 1, units, workspace, printer, entities}` |
+| Project file | download / open / drag-drop | `*.modeler.json`: `{format: 'modeler', version: 1, units, workspace, printer, entities, groups}` |
 | App settings (snap per workspace, cut preview, filament) | `localStorage` | `modeler.settings.v1` |
 | Shortcut overrides, hold keys | `localStorage` | `modeler.keymap.v1` |
 | Last sidebar tab | `localStorage` | `modeler.sidebarTab` |
 
-Loading is defensive (`parseDocumentFile`): invalid entities are dropped, duplicate ids re-issued, and unknown workspaces or printers fall back to defaults.
+Loading is defensive (`parseDocumentFile`):
+- invalid entities are dropped and duplicate ids re-issued;
+- references to missing groups are removed, and empty groups pruned;
+- unknown workspaces or printers fall back to defaults.
 
 ## Invariants
 
-These must hold after every committed change. The Modeler API will enforce them in one place.
+These must hold after every committed change. The Modeler API enforces them in `validateEntity` (`src/api/core.ts`).
 
 1. All lengths are finite and in mm; sizes, radius and height are > 0; extrusion outlines have ≥ 3 points and non-zero area.
 2. Entity ids are unique strings; names are non-empty.
 3. Stored numbers are clean (`cleanNumber` / `cleanVec`): no `599.9999999` in the properties panel or cut list.
 4. One user action, or one AI turn, is **one undo step**.
-5. The model layer (`src/model`) never imports from `viewport`, `ui`, `tools` or the DOM.
+5. The model layer (`src/model`) never imports from `viewport`, `ui`, `tools`, `api` or the DOM, and `src/api` imports only `src/model`.
+6. Every group has at least one member (directly or through subgroups); `groupId` / `parentId` never point at missing groups.
 
 ## Module map
 
 ```
+mcp/                  MCP server (Node), bundled to mcp/dist by npm run build:mcp — see mcp/README.md
+  src/main.ts, server.ts, bridge.ts, files.ts
 src/
   main.ts             entry; creates App, exposes window.modeler (debug + smoke test)
   App.ts              layout, toolbar, workspace switching, keyboard/pointer routing, runCommand
   commands.ts         bindable command list + default keys
   keymap.ts           combo parsing/display, conflicts, persistence (pure, unit-tested)
+  api/                Modeler API (DOM-free, unit-tested) — see docs/modeler-api.md
+    schemas.ts, core.ts, operations.ts, ModelerApi.ts, reference.ts
+    guide.ts            how an AI should use the API (MCP instructions / system prompt)
+  bridge/             live link to the MCP server (ADR 0013)
+    protocol.ts         message types, port, protocol version (DOM-free, shared with mcp/)
+    BridgeClient.ts     the tab side: dials out on "Connect AI", runs requests on the API
   model/              DOM-free domain layer (unit-tested)
-    types.ts            Entity, DocumentFile, Unit
-    Document.ts         ModelDocument: entities, selection, transactions, undo, events
+    types.ts            Entity, Group, DocumentFile, Unit
+    Document.ts         ModelDocument: entities, groups, selection, transactions, undo, events
+    groups.ts           group membership helpers (selection units, pruning, nesting)
+    editing.ts          copyEntities (shared by the API and the Move tool)
+    naming.ts           "Shelf" → "Shelf 2"
+    quantities.ts       footprints and CSG volumes
     geometry.ts         meshes from entities, bounds, snap points, faces, push/pull, drawing planes
     csg.ts              hole subtraction (three-bvh-csg), world geometry for export
     units.ts            parse/format lengths and angles
@@ -138,7 +166,7 @@ src/
     Snapper.ts          inference engine
     Grid.ts, SceneHelpers.ts, edges.ts, overlay.ts
   tools/              interactive tools (Tool base + one class per tool)
-  ui/                 Sidebar (Properties/Print/Quantities/Cut list/Objects), ShortcutsDialog, icons, dom helper
-tests/                vitest unit tests for model + keymap + edges
+  ui/                 Sidebar (Properties/Print/Quantities/Cut list/Objects tree), ShortcutsDialog, ContextMenu, icons, dom helper
+tests/                vitest unit tests: model, api (+ generated reference check), keymap, edges
 scripts/smoke.mjs     end-to-end test driving the real UI in headless Chrome
 ```

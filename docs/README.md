@@ -5,6 +5,7 @@
 | [User guide](user-guide.md) | Workspaces, tools, typing measurements, navigation, shortcuts, files | You want to *use* the app |
 | [Architecture](architecture.md) | Layers, data flow, key concepts, invariants, module map | You're changing code, or want to know how it works |
 | [Modeler API](modeler-api.md) | The typed operation layer that the UI, the AI chat and MCP all use | You're adding a feature or an AI capability |
+| [API reference](api-reference.md) | Every operation and its fields (generated from code) | You're calling the API |
 | [AI integration](ai-integration.md) | The in-app assistant panel and the MCP server: design and phases | You're working on AI features |
 | [Development](development.md) | Setup, scripts, testing, conventions, step-by-step recipes | You're about to write code |
 | [Roadmap](roadmap.md) | What's planned, roughly in order | You're deciding what to do next |

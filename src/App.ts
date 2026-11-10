@@ -1,7 +1,8 @@
 import * as THREE from 'three';
+import { ModelerApi, type ApiResult } from './api';
+import { BridgeClient, type BridgeStatus } from './bridge/BridgeClient';
 import { cutListToCsv, buildCutList } from './model/cutlist';
-import { ModelDocument, newId } from './model/Document';
-import { cleanNumber, worldBoundsOf } from './model/geometry';
+import { ModelDocument } from './model/Document';
 import {
   downloadBlob,
   exportStl,
@@ -13,11 +14,11 @@ import {
   saveSettings,
   type Settings,
 } from './model/io';
+import { groupChain, groupForSelection, groupMembers, isInsideGroup, selectionUnit } from './model/groups';
 import type { Entity, Unit } from './model/types';
 import {
   checkPrintFit,
   isWorkspaceId,
-  placeOnPlateDelta,
   printerName,
   printerVolume,
   WORKSPACE_IDS,
@@ -39,6 +40,7 @@ import { COMMANDS } from './commands';
 import { comboFromEvent, holdKeyLabel, Keymap, MEASUREMENT_CHARS, type HoldAction } from './keymap';
 import { h, isTextInput } from './ui/dom';
 import { icon } from './ui/icons';
+import { ContextMenu, type MenuItem } from './ui/ContextMenu';
 import { ShortcutsDialog } from './ui/ShortcutsDialog';
 import { Sidebar } from './ui/Sidebar';
 import { Snapper } from './viewport/Snapper';
@@ -77,12 +79,17 @@ export class App {
   readonly settings: Settings = loadSettings();
   readonly viewport: Viewport;
   readonly snapper: Snapper;
+  /** The Modeler API: every model change from the UI goes through it (ADR 0008). */
+  readonly api: ModelerApi;
+  /** Live link to the MCP server, opened by the "Connect AI" command (ADR 0013). */
+  readonly bridge: BridgeClient;
   private readonly tools: Record<ToolId, Tool>;
   private active: Tool;
   private readonly sidebar: Sidebar;
   private readonly toolButtons = new Map<ToolId, HTMLButtonElement>();
   readonly keymap = new Keymap(COMMANDS, safeStorage());
   private readonly shortcuts: ShortcutsDialog;
+  private readonly contextMenu = new ContextMenu();
   /** Buttons whose tooltip shows a (customisable) shortcut. */
   private readonly titled: { el: HTMLElement; label: string; command: string }[] = [];
   private readonly workspaceButtons = new Map<WorkspaceId, HTMLButtonElement>();
@@ -99,9 +106,11 @@ export class App {
     snap: HTMLInputElement;
     snapStep: HTMLInputElement;
     snapList: HTMLDataListElement;
+    groupBadge: HTMLElement;
     ortho: HTMLButtonElement;
     xray: HTMLButtonElement;
     cuts: HTMLButtonElement;
+    ai: HTMLButtonElement;
   };
   private fileName = 'model';
   private defaultColor = '#d4dae3';
@@ -115,13 +124,15 @@ export class App {
   /** The hold key currently down, to tell a tap (tool toggle) from a hold-and-drag. */
   private heldKey: { key: string; dragged: boolean; at: number } | null = null;
   private pointerButtons = 0;
+  private rightDown: { x: number; y: number } | null = null;
   private toastTimer = 0;
 
   constructor(root: HTMLElement) {
     // ---- layout ----
     const vpEl = h('main', { class: 'viewport' });
     const empty = h('div', { class: 'vp-empty' });
-    vpEl.append(empty);
+    const groupBadge = h('div', { class: 'group-badge', hidden: true });
+    vpEl.append(empty, groupBadge);
 
     const hint = h('div', { class: 'hint' });
     const vcbLabel = h('span', { class: 'vcb-label' });
@@ -145,6 +156,8 @@ export class App {
     const ortho = textBtn('Persp', 'Toggle perspective / orthographic (parallel) projection', 'view.projection');
     const xray = textBtn('X-ray', 'See through solids', 'view.xray');
     const cuts = textBtn('Cuts', 'Show holes cut into solids (turn off if the scene gets slow)', 'view.cuts');
+    const ai = btn('ai', 'Let Claude edit this model through the modeler MCP server', 'ai.connect', 'Connect AI');
+    ai.classList.add('ai-btn');
 
     const views: [ViewName, string][] = [
       ['iso', 'Iso'],
@@ -177,6 +190,7 @@ export class App {
         snapList,
         units,
       ),
+      h('div', { class: 'tb-group' }, ai),
       h('div', { class: 'tb-group' }, btn('keyboard', 'Keyboard shortcuts', 'help.shortcuts')),
     );
 
@@ -186,12 +200,23 @@ export class App {
     this.shortcuts = new ShortcutsDialog(this.keymap);
     root.append(topbar, toolbar, vpEl, sidebarEl, statusbar, toast, this.shortcuts.el);
 
-    this.els = { hint, vcbLabel, vcb, toast, empty, undo, redo, units, snap, snapStep, snapList, ortho, xray, cuts };
+    this.els = { hint, vcbLabel, vcb, toast, empty, undo, redo, units, snap, snapStep, snapList, ortho, xray, cuts, groupBadge, ai };
 
     // ---- core ----
     this.viewport = new Viewport(vpEl, this.doc);
     this.viewport.showCuts = this.settings.showCuts;
     this.snapper = new Snapper(this.viewport, this.doc, this.settings);
+    this.api = new ModelerApi(this.doc, {
+      renderViews: (views, size) => this.viewport.renderViewImages(views, size),
+    });
+    this.bridge = new BridgeClient(this.api, {
+      port: Number(new URLSearchParams(location.search).get('aiPort')) || undefined,
+      onStatus: (status, why) => this.showAiStatus(status, why),
+      beforeRequest: () => {
+        if (this.doc.inTransaction) this.active.cancel();
+      },
+      onModelChange: (label) => this.toast(label),
+    });
 
     const ctx: ToolContext = {
       doc: this.doc,
@@ -249,6 +274,8 @@ export class App {
       },
       placeOnPlate: (ids) => this.placeOnPlate(ids),
       exportStl: () => this.exportStl(),
+      call: (name, input, label) => this.uiCall(name, input, label).ok,
+      runCommand: (id) => this.runCommand(id),
     });
     sidebarEl.append(this.sidebar.el);
 
@@ -260,7 +287,31 @@ export class App {
     });
     this.doc.onSelectionChange(() => {
       this.viewport.updateStyles();
+      this.updateGroupBadge();
       if (!this.active.busy) this.els.hint.textContent = this.active.hint();
+    });
+    // Document settings can change from the UI or the API (AI); react the same way.
+    this.doc.onSettingsChange((change) => {
+      if (change === 'workspace') {
+        this.applyWorkspace();
+        if (!this.doc.entities.length) {
+          this.viewport.setView('iso', false);
+          this.viewport.zoomExtents();
+        }
+        const ws = this.workspace;
+        this.toast(`${ws.name} workspace — ${ws.units}, snap ${formatLength(this.settings.snapStep, ws.units)}`);
+      } else if (change === 'printer') {
+        this.viewport.setPlate(printerVolume(this.doc.printer), printerName(this.doc.printer));
+        this.updatePrintChecks();
+        this.sidebar.render(true);
+        if (!this.doc.entities.length) this.viewport.zoomExtents();
+      } else {
+        this.els.units.value = this.doc.units;
+        this.refreshSnapList();
+        this.showSnapStep();
+        this.sidebar.render(true);
+      }
+      saveAutosave(this.doc.toFile());
     });
 
     this.bindSettings();
@@ -283,7 +334,7 @@ export class App {
   private restore() {
     const saved = loadAutosave();
     if (saved) this.doc.load(saved, true);
-    this.applyWorkspace(this.doc.workspace, { keepUnits: true });
+    this.applyWorkspace();
     this.viewport.sync();
     this.viewport.setView('iso', false);
     this.viewport.zoomExtents();
@@ -310,31 +361,21 @@ export class App {
     return wrap;
   }
 
-  /**
-   * Switch the whole app to a workspace: units, snap, grid, materials, panels, plate.
-   * `keepUnits` is used when opening a file (its own units win).
-   */
+  /** Switch workspace (through the API, so the AI does it the same way). */
   setWorkspace(id: WorkspaceId) {
     if (id === this.doc.workspace) return;
     this.active.cancel();
-    this.applyWorkspace(id, { keepUnits: false });
-    if (!this.doc.entities.length) {
-      this.viewport.setView('iso', false);
-      this.viewport.zoomExtents();
-    }
-    const ws = this.workspace;
-    this.toast(`${ws.name} workspace — ${ws.units}, snap ${formatLength(this.settings.snapStep, ws.units)}`);
-    saveAutosave(this.doc.toFile());
+    this.uiCall('set_workspace', { workspace: id });
   }
 
-  private applyWorkspace(id: WorkspaceId, opts: { keepUnits: boolean }) {
-    if (!isWorkspaceId(id)) id = 'print';
-    this.doc.workspace = id;
+  /** Push the document's workspace into the UI: snap, grid, materials, panels, plate. */
+  private applyWorkspace() {
+    if (!isWorkspaceId(this.doc.workspace)) this.doc.workspace = 'print';
+    const id = this.doc.workspace;
     const ws = WORKSPACES[id];
-    if (!opts.keepUnits) this.doc.units = ws.units;
     this.els.units.value = this.doc.units;
     this.settings.snapStep = this.settings.snapByWorkspace[id] ?? ws.snapStep;
-    this.els.snapList.replaceChildren(...ws.snapSteps.map((v) => h('option', { value: formatLength(v, this.doc.units, false) })));
+    this.refreshSnapList();
     this.showSnapStep();
     this.defaultColor = ws.defaultColor;
     this.viewport.applyWorkspace(ws);
@@ -348,13 +389,26 @@ export class App {
     this.refreshEmptyCard();
   }
 
+  private refreshSnapList() {
+    this.els.snapList.replaceChildren(...this.workspace.snapSteps.map((v) => h('option', { value: formatLength(v, this.doc.units, false) })));
+  }
+
   private setPrinter(setting: PrinterSetting) {
-    this.doc.printer = setting;
-    this.viewport.setPlate(printerVolume(setting), printerName(setting));
-    this.updatePrintChecks();
-    this.sidebar.render(true);
-    saveAutosave(this.doc.toFile());
-    if (!this.doc.entities.length) this.viewport.zoomExtents();
+    this.uiCall('set_printer', setting.profile === 'custom' ? { custom: setting.custom } : { profile: setting.profile });
+  }
+
+  /**
+   * Run an API operation for the UI. Errors become a toast with the API's hint, so the
+   * user sees the same explanation an AI client would get.
+   */
+  uiCall(name: string, input: unknown, label?: string): ApiResult {
+    const result = this.api.call(name, input, { source: 'ui', label });
+    if (!result.ok) this.toast(result.error.hint ? `${result.error.message} — ${result.error.hint}` : result.error.message);
+    return result;
+  }
+
+  private resultIds(result: ApiResult): string[] {
+    return result.ok ? ((result.data as { ids?: string[] })?.ids ?? []) : [];
   }
 
   /** Re-check parts against the build volume (cheap: bounds only, runs live while dragging). */
@@ -365,17 +419,8 @@ export class App {
   }
 
   private placeOnPlate(ids: string[]) {
-    const entities = ids.map((id) => this.doc.get(id)).filter(Boolean) as Entity[];
-    const delta = placeOnPlateDelta(entities, printerVolume(this.doc.printer));
-    if (delta.lengthSq() < 1e-12) return;
-    this.doc.transact(() => {
-      for (const e of entities) {
-        this.doc.update(e.id, (x) => {
-          x.position = [cleanNumber(x.position[0] + delta.x), cleanNumber(x.position[1] + delta.y), cleanNumber(x.position[2] + delta.z)];
-        });
-      }
-    });
-    this.toast('Centred on the bed');
+    if (!ids.length) return;
+    if (this.uiCall('place_on_plate', { target: { ids } }, 'Place on plate').ok) this.toast('Centred on the bed');
   }
 
   private scheduleAutosave() {
@@ -421,12 +466,8 @@ export class App {
       showStep();
     });
     units.addEventListener('change', () => {
-      this.doc.units = units.value as Unit;
-      showStep();
-      this.els.snapList.replaceChildren(...this.workspace.snapSteps.map((v) => h('option', { value: formatLength(v, this.doc.units, false) })));
-      this.sidebar.render(true);
       this.active.cancel();
-      saveAutosave(this.doc.toFile());
+      this.doc.setUnits(units.value as Unit);
     });
   }
 
@@ -580,9 +621,23 @@ export class App {
       'edit.placeOnGround': () => this.placeOnGround(selected()),
       'edit.toggleHole': () => {
         const sel = this.doc.selected();
-        if (!sel.length) return;
-        const makeHole = !sel.every((e) => e.hole);
-        this.doc.transact(() => sel.forEach((e) => this.doc.update(e.id, (x) => (x.hole = makeHole))));
+        if (sel.length) this.uiCall('set_hole', { target: { selection: true }, hole: !sel.every((e) => e.hole) }, 'Solid / hole');
+      },
+      'edit.group': () => this.groupSelection(),
+      'edit.ungroup': () => this.ungroupSelection(),
+      'edit.openGroup': () => {
+        const g = groupForSelection(this.doc.selection, this.doc.entities, this.doc.groups);
+        if (g) {
+          this.doc.setOpenGroup(g.id);
+          this.doc.clearSelection();
+        }
+      },
+      'edit.closeGroup': () => this.closeGroup(),
+      'edit.hide': () => {
+        if (this.doc.selection.size) this.uiCall('set_visible', { target: { selection: true }, visible: false }, 'Hide');
+      },
+      'edit.showHidden': () => {
+        if (this.doc.entities.some((e) => !e.visible)) this.uiCall('set_visible', { target: { all: true }, visible: true }, 'Show hidden');
       },
       'view.extents': () => this.viewport.zoomExtents(),
       'view.zoomSelection': () => this.viewport.zoomExtents(this.doc.selected()),
@@ -601,6 +656,7 @@ export class App {
       'file.exportStl': () => this.exportStl(),
       'file.exportCutList': () => this.exportCutList(),
       'help.shortcuts': () => this.shortcuts.toggle(),
+      'ai.connect': () => (this.bridge.status === 'off' ? this.bridge.start() : this.bridge.stop('AI disconnected')),
       'print.placeOnPlate': () => {
         const sel = this.doc.selected();
         this.placeOnPlate((sel.length ? sel : this.doc.entities).map((e) => e.id));
@@ -628,6 +684,7 @@ export class App {
     }
     canvas.addEventListener('pointerdown', (e) => {
       if (document.activeElement !== canvas) canvas.focus({ preventScroll: true });
+      if (e.button === 2) this.rightDown = { x: e.clientX, y: e.clientY };
       if (this.heldKey) this.heldKey.dragged = true;
       if (this.tempNav) {
         if (e.button === 0) canvas.style.cursor = 'grabbing';
@@ -641,6 +698,13 @@ export class App {
       this.active.pointerMove(this.toolEvent(e));
     });
     canvas.addEventListener('pointerup', (e) => {
+      // Right-click (no drag) opens the context menu; right-drag pans (ADR 0012).
+      if (e.button === 2 && this.rightDown) {
+        const moved = Math.hypot(e.clientX - this.rightDown.x, e.clientY - this.rightDown.y);
+        this.rightDown = null;
+        if (moved < 4 && !this.tempNav) this.openContextMenu(e);
+        return;
+      }
       if (this.tempNav) {
         if (this.tempNav.ending) this.endTempNav();
         else canvas.style.cursor = 'grab';
@@ -654,6 +718,7 @@ export class App {
     canvas.addEventListener('pointerleave', () => {
       if (!this.active.busy) this.viewport.setSnapMarker(null);
       this.viewport.setHover(null);
+      if (this.active.id !== 'move' || !this.active.busy) this.viewport.setHighlighted([]);
     });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   }
@@ -672,7 +737,11 @@ export class App {
       }
 
       if (e.key === 'Escape') {
-        if (!this.active.busy) this.doc.clearSelection();
+        // Cancel the operation first; then clear the selection; then leave an open group.
+        if (this.contextMenu.isOpen) this.contextMenu.close();
+        else if (this.active.busy) this.active.cancel();
+        else if (this.doc.selection.size) this.doc.clearSelection();
+        else this.closeGroup();
         this.active.cancel();
         e.preventDefault();
         return;
@@ -776,6 +845,17 @@ export class App {
     this.updateChrome();
   }
 
+  private showAiStatus(status: BridgeStatus, why?: string) {
+    const b = this.els.ai;
+    const text = { off: 'Connect AI', waiting: 'Waiting for AI…', connected: 'AI connected' }[status];
+    b.querySelector('span')!.textContent = text;
+    b.classList.toggle('ai-waiting', status === 'waiting');
+    b.classList.toggle('ai-on', status === 'connected');
+    if (why) this.toast(why);
+    else if (status === 'connected') this.toast('Connected: Claude can now see and edit this model');
+    else if (status === 'waiting') this.toast(`Waiting for the modeler MCP server (${this.bridge.url}). Start Claude with it configured.`);
+  }
+
   // ---- actions --------------------------------------------------------------
 
   private toast(text: string) {
@@ -805,7 +885,7 @@ export class App {
       const parsed = parseDocumentFile(await file.text());
       this.active.cancel();
       this.doc.load(parsed, false);
-      this.applyWorkspace(this.doc.workspace, { keepUnits: true });
+      this.applyWorkspace();
       this.fileName = file.name.replace(/(\.modeler)?\.json$/i, '') || 'model';
       this.viewport.zoomExtents();
       this.updateChrome();
@@ -839,36 +919,101 @@ export class App {
   }
 
   private deleteSelection() {
-    if (!this.doc.selection.size) return;
-    this.doc.remove([...this.doc.selection]);
+    if (this.doc.selection.size) this.uiCall('delete_entities', { target: { selection: true } }, 'Delete');
   }
 
-  /** Copies sit right next to the originals (+X) so they're easy to grab. */
+  /** ⌘D: one copy beside the original (whole groups are copied as groups); copies get selected. */
   private duplicateSelection() {
-    const sel = this.doc.selected();
-    if (!sel.length) return;
-    const size = worldBoundsOf(sel).getSize(new THREE.Vector3());
-    const offset = cleanNumber(size.x + Math.max(10, size.x * 0.1));
-    const ids: string[] = [];
-    this.doc.transact(() => {
-      for (const e of sel) {
-        const copy = structuredClone(e);
-        copy.id = newId();
-        copy.position = [cleanNumber(e.position[0] + offset), e.position[1], e.position[2]];
-        this.doc.add(copy);
-        ids.push(copy.id);
-      }
-    });
-    this.doc.setSelection(ids);
+    if (!this.doc.selection.size) return;
+    const ids = this.resultIds(this.uiCall('duplicate', { target: { selection: true } }, 'Duplicate'));
+    if (ids.length) this.doc.setSelection(ids);
   }
 
   private placeOnGround(ids: string[]) {
-    const entities = ids.map((id) => this.doc.get(id)).filter(Boolean) as Entity[];
-    if (!entities.length) return;
-    const minZ = worldBoundsOf(entities).min.z;
-    if (Math.abs(minZ) < 1e-9) return;
-    this.doc.transact(() => {
-      for (const e of entities) this.doc.update(e.id, (x) => (x.position[2] = cleanNumber(x.position[2] - minZ)));
+    if (ids.length) this.uiCall('place_on_ground', { target: { ids } }, 'Place on ground');
+  }
+
+  private groupSelection() {
+    if (!this.doc.selection.size) return;
+    const result = this.uiCall('group', { target: { selection: true } }, 'Group');
+    if (result.ok) this.toast(`Grouped ${this.doc.selection.size} part${this.doc.selection.size === 1 ? '' : 's'} — double-click to edit inside`);
+  }
+
+  private ungroupSelection() {
+    const g = groupForSelection(this.doc.selection, this.doc.entities, this.doc.groups);
+    if (!g) {
+      this.toast('Select a group to ungroup');
+      return;
+    }
+    if (this.doc.openGroupId === g.id) this.doc.setOpenGroup(g.parentId ?? null);
+    this.uiCall('ungroup', { group: g.id }, 'Ungroup');
+  }
+
+  /** Leave the open group (back to its parent group, or the top level). */
+  private closeGroup() {
+    const open = this.doc.openGroupId ? this.doc.getGroup(this.doc.openGroupId) : null;
+    if (!open) return;
+    this.doc.setOpenGroup(open.parentId ?? null);
+    this.doc.setSelection(groupMembers(open.id, this.doc.entities, this.doc.groups).map((e) => e.id));
+  }
+
+  // ---- context menu (ADR 0012) ------------------------------------------------
+
+  private openContextMenu(e: PointerEvent) {
+    if (this.active.busy) return; // don't interrupt a drawing/move in progress
+    const hit = this.viewport.pick(this.toolEvent(e).px);
+    if (hit) {
+      const open = this.doc.openGroupId;
+      if (open && !isInsideGroup(hit.entity, open, this.doc.groups)) this.doc.setOpenGroup(null);
+      const unit = selectionUnit(hit.entity, this.doc.entities, this.doc.groups, this.doc.openGroupId);
+      if (!unit.every((id) => this.doc.selection.has(id))) this.doc.setSelection(unit);
+    }
+    this.contextMenu.open(e.clientX, e.clientY, this.menuItems(!!hit && this.doc.selection.size > 0));
+  }
+
+  private menuItems(onSelection: boolean): MenuItem[] {
+    const item = (command: string, label: string, danger = false): MenuItem => ({
+      label,
+      shortcut: this.keymap.label(command),
+      danger,
+      run: () => this.runCommand(command),
     });
+    if (onSelection) {
+      const group = groupForSelection(this.doc.selection, this.doc.entities, this.doc.groups);
+      const sel = this.doc.selected();
+      const allHoles = sel.every((x) => x.hole);
+      return [
+        item('edit.duplicate', 'Duplicate'),
+        item('edit.group', group ? 'Group (nest in a new group)' : 'Group'),
+        ...(group ? [item('edit.ungroup', 'Ungroup'), item('edit.openGroup', 'Open group')] : []),
+        'separator',
+        item('edit.toggleHole', allHoles ? 'Make solid' : 'Make hole'),
+        this.workspace.printPlate ? item('print.placeOnPlate', 'Place on plate') : item('edit.placeOnGround', 'Place on ground'),
+        'separator',
+        item('view.zoomSelection', 'Zoom to selection'),
+        item('edit.hide', 'Hide'),
+        'separator',
+        item('edit.delete', 'Delete', true),
+      ];
+    }
+    const items: MenuItem[] = [item('edit.selectAll', 'Select all'), item('view.extents', 'Zoom extents')];
+    if (this.doc.entities.some((x) => !x.visible)) items.push(item('edit.showHidden', 'Show all hidden'));
+    if (this.doc.openGroupId) items.push(item('edit.closeGroup', 'Close group'));
+    items.push('separator', item('view.iso', 'Iso view'), item('view.top', 'Top view'), item('view.front', 'Front view'));
+    return items;
+  }
+
+  /** "Editing: Bookcase ✕" badge while a group is open. */
+  private updateGroupBadge() {
+    const open = this.doc.openGroupId ? this.doc.getGroup(this.doc.openGroupId) : null;
+    const badge = this.els.groupBadge;
+    badge.hidden = !open;
+    if (!open) return;
+    const path = groupChain(open.id, this.doc.groups).reverse().map((g) => g.name).join(' › ');
+    badge.replaceChildren(
+      h('span', { class: 'muted' }, 'Editing group'),
+      h('strong', {}, path),
+      h('button', { class: 'icon-btn', title: 'Close group (Esc)', 'aria-label': 'Close group', onclick: () => this.closeGroup() }, '×'),
+    );
   }
 }

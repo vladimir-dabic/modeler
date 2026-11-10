@@ -1,6 +1,6 @@
 # AI integration
 
-> **Status:** planned. The decision is [ADR 0009](adr/0009-ai-assistant-in-app-and-mcp.md); everything here builds on the [Modeler API](modeler-api.md) ([ADR 0008](adr/0008-modeler-api-single-entry-point.md)).
+> **Status:** the Modeler API ([modeler-api.md](modeler-api.md), [api-reference.md](api-reference.md)) and the **MCP server** ([mcp/README.md](../mcp/README.md)) are **implemented**. The in-app panel is **next**. Decisions: [ADR 0009](adr/0009-ai-assistant-in-app-and-mcp.md), [ADR 0013](adr/0013-mcp-server-bridge-and-files.md).
 
 There will be two ways to model with AI, and both drive the same Modeler API operations:
 
@@ -79,7 +79,7 @@ These are current guidance; re-check the Claude API docs (the `claude-api` skill
 
 ### System prompt (per workspace)
 
-A stable core plus a workspace section:
+The text lives in code, in `src/api/guide.ts` (`CORE_GUIDE`, `WORKSPACE_GUIDES`). The MCP server already sends it as its instructions. A stable core plus a workspace section:
 - **Core:** units are mm, Z-up. Express a whole intent in one call: selectors, patterns, `place`/`distribute`, and `apply_operations` with `$refs` ([ADR 0010](adr/0010-token-efficient-api.md)). Read with `get_scene { detail: 'outline' }` first on big models. Verify with the returned bounds/warnings, and use `render_views` when shape or alignment matters. Ask before deleting many parts. Name parts meaningfully, because names appear in cut lists.
 - **Print:** bed size. Typical clearances: ~0.2 mm for sliding fits, 0.1 mm for press fits. Minimum wall ~1.2 mm (3 perimeters at 0.4 mm nozzle). Avoid unsupported overhangs > 45°. Holes for M3 ≈ Ø3.2–3.4.
 - **Workshop:** standard sheet thicknesses (18/12/6 mm ply, 3/4"). Name every board. Real joinery allowances.
@@ -91,14 +91,50 @@ Rough: a few cents for a small edit, around 10–30 cents for a multi-step build
 
 ## MCP server
 
-A separate Node package in the repo (`mcp/`) that exposes **the same operations** as MCP tools: same names, same JSON Schemas, same descriptions.
+> **Implemented.** Setup and options: [mcp/README.md](../mcp/README.md). Decisions: [ADR 0013](adr/0013-mcp-server-bridge-and-files.md).
+
+The server (`mcp/src`, bundled to `mcp/dist/modeler-mcp.mjs` by `npm run build:mcp`) exposes **the same operations** as MCP tools: same names, same JSON Schemas, same descriptions (`ModelerApi.toolDefinitions({ includeHostOps: true })`). It adds one tool of its own, `connection_status`. Its MCP `instructions` are the shared guide in `src/api/guide.ts` (core + all workspaces), plus a note on the two modes.
 
 - **Live bridge mode:**
-  - The server listens on a localhost WebSocket. The open modeler tab connects when you click "Connect AI" (or automatically in dev). Tool calls are forwarded to the tab's `ModelerApi`, and you watch the model change live.
-  - The **browser** dials **out** to a fixed local port, and the server accepts only one paired tab, with a one-time pairing code shown in the app. No other page or process can drive your model.
-- **Headless mode:** no browser. The server loads a `.modeler.json` into its own `ModelDocument` (the model layer runs in Node), runs operations, and saves. `export_stl` writes a file. Good for "make me a cable clip for 6 mm cables" straight from Claude Code.
-- **Configuration:** a standard stdio MCP server entry for Claude Desktop / Claude Code, documented in the package README when it lands.
+  - The server listens on `ws://127.0.0.1:47830`. The open modeler tab dials **out** to it when the user clicks **Connect AI** in the top bar (command `ai.connect`). It retries while the button says *Waiting for AI…*, and shows *AI connected* when linked.
+  - The server accepts only the app's origins (exact allow-list) and a `localhost`/`127.0.0.1` Host. One tab at a time: a new tab takes over.
+  - Each tool call runs in the tab through `api.callAsync(name, input, { source: 'mcp', label: 'AI: …' })`, so you watch the model change live and every call is one labelled undo step. `apply_operations` takes an optional `label` for that step.
+  - `render_views` returns PNGs as MCP image content.
+- **Headless mode:** when no tab is connected, calls run on the server's own in-memory `ModelDocument`. The first change says so in `warnings`.
+- **Files** (`open_file`, `save_file`, `export_stl`) are `host` operations that only the server can run, limited to its working folder (`--root`).
+  - In live mode they run in Node on a copy of the tab's model (with its selection).
+  - `open_file` pushes the loaded model back to the tab as one undoable step.
+  - The browser never gets file access.
 - `render_views` works only in live-bridge mode. It returns `unsupported` headless (until we add offscreen rendering in Node).
+
+### Bridge protocol (`src/bridge/protocol.ts`)
+
+```
+tab → server   { type: 'hello', protocol: 1, app: 'modeler' }
+server → tab   { type: 'welcome', protocol: 1, server }
+server → tab   { type: 'call', id, name, input, label? }   → { type: 'result', id, result: ApiResult }
+server → tab   { type: 'get_file', id }                    → result.data = { file, selection }
+server → tab   { type: 'load_file', id, file, label }      → the tab re-validates and loads it as one undo step
+```
+
+Close codes: `4000`: another tab took over; `4001`: protocol mismatch.
+
+### Tests
+
+- `tests/mcp.test.ts` runs the server in-process over the SDK's in-memory transport, with a Node "tab" (the real `BridgeClient` over `ws`). It covers:
+  - headless build → save → reopen → STL;
+  - working-folder escapes;
+  - live routing and undo labels;
+  - file operations against the tab;
+  - fallback on disconnect;
+  - origin refusal and takeover.
+- `scripts/smoke.mjs` step 17 starts the **built bundle** over stdio, clicks Connect AI in real Chrome, and runs a batch, `render_views` and `export_stl`.
+
+### Not yet
+
+- A pairing code, if the bridge ever listens beyond localhost (ADR 0013).
+- Offscreen `render_views` in headless mode.
+- An MCP resource with the per-workspace guide, if clients make good use of resources; the guide currently goes in `instructions`.
 
 ## Safety and trust
 
@@ -109,7 +145,7 @@ A separate Node package in the repo (`mcp/`) that exposes **the same operations*
 
 ## Phases
 
-1. **Modeler API:** extract `src/api`, move sidebar/command edits onto it, plus operation and scenario tests. *Prerequisite for everything below.*
-2. **MCP live bridge + headless.** The fastest path to real AI modeling (uses the Claude subscription), and it tunes the tool descriptions on real requests.
-3. **In-app assistant panel:** proxy, streaming, selection context, Keep/Undo, render_views.
-4. **Groups, then components,** so the AI can build and reuse assemblies (drawer, leg, bracket). Group operations land with the API (see [roadmap](roadmap.md)).
+1. ✅ **Modeler API** (`src/api`), with operation and scenario tests and a generated reference.
+2. ✅ **Groups** (part of the API and UI). Components (linked copies) come later.
+3. ✅ **MCP headless + live bridge** ([above](#mcp-server)). The fastest path to real AI modeling (uses the Claude subscription). Use it on real requests to tune the tool descriptions.
+4. **Next: in-app assistant panel:** proxy, streaming, selection context, Keep/Undo, render_views. Reuse `src/api/guide.ts` for the system prompt and `toolDefinitions()` for the tools (without the file operations).

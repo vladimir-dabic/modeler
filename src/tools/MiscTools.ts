@@ -96,20 +96,25 @@ export class EraseTool extends Tool {
   override readonly cursor = 'pointer';
 
   hint(): string {
-    return 'Eraser: click an object to delete it.';
+    return 'Eraser: click an object to delete it (a group goes as a whole unless it is open).';
   }
 
   pointerMove(e: ToolEvent) {
     const hit = this.viewport.pick(e.px);
-    this.viewport.setHover(hit?.entity.id ?? null, COLORS.erase);
+    this.viewport.setHighlighted(hit ? this.unitOf(hit.entity) : [], COLORS.erase);
   }
 
   pointerDown(e: ToolEvent) {
     if (e.button !== 0) return;
     const hit = this.viewport.pick(e.px);
     if (!hit) return;
-    this.doc.remove([hit.entity.id]);
-    this.viewport.setHover(null);
+    this.doc.remove(this.unitOf(hit.entity));
+    this.viewport.setHighlighted([]);
+  }
+
+  override deactivate() {
+    super.deactivate();
+    this.viewport.setHighlighted([]);
   }
 }
 

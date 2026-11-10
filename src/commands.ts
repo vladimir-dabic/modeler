@@ -22,6 +22,12 @@ export const COMMANDS: CommandDef[] = [
   { id: 'edit.delete', label: 'Delete selection', category: 'Edit', keys: ['Delete', 'Backspace'] },
   { id: 'edit.duplicate', label: 'Duplicate selection', category: 'Edit', keys: ['Mod+D'] },
   { id: 'edit.selectAll', label: 'Select all', category: 'Edit', keys: ['Mod+A'] },
+  { id: 'edit.group', label: 'Group selection', category: 'Edit', keys: ['Mod+G'] },
+  { id: 'edit.ungroup', label: 'Ungroup', category: 'Edit', keys: ['Mod+Shift+G'] },
+  { id: 'edit.openGroup', label: 'Open group (edit inside)', category: 'Edit', keys: [] },
+  { id: 'edit.closeGroup', label: 'Close group', category: 'Edit', keys: [] },
+  { id: 'edit.hide', label: 'Hide selection', category: 'Edit', keys: [] },
+  { id: 'edit.showHidden', label: 'Show all hidden', category: 'Edit', keys: [] },
   { id: 'edit.placeOnGround', label: 'Place selection on ground', category: 'Edit', keys: [] },
   { id: 'edit.toggleHole', label: 'Toggle solid / hole', category: 'Edit', keys: [] },
 
@@ -49,6 +55,8 @@ export const COMMANDS: CommandDef[] = [
   { id: 'workspace.workshop', label: 'Workshop workspace (woodworking)', category: 'Workspace', keys: [] },
   { id: 'workspace.build', label: 'Build workspace (houses)', category: 'Workspace', keys: [] },
   { id: 'print.placeOnPlate', label: 'Place on print plate', category: 'Workspace', keys: [] },
+
+  { id: 'ai.connect', label: 'Connect / disconnect AI (MCP bridge)', category: 'AI', keys: [] },
 
   { id: 'help.shortcuts', label: 'Keyboard shortcuts', category: 'Help', keys: ['?'] },
 ];

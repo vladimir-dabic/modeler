@@ -1,17 +1,10 @@
 import * as THREE from 'three';
-import { newId } from '../model/Document';
+import { copyEntities } from '../model/editing';
 import { cleanVec, groundPlane, intersectRayPlane } from '../model/geometry';
 import type { Entity, Vec3 } from '../model/types';
 import { parseLengthList } from '../model/units';
 import { axisColor, COLORS, makeLabel, makeLine, setLabel } from '../viewport/overlay';
 import { arrowAxis, axisName, sameAxis, Tool, type ToolEvent } from './Tool';
-
-function cloneEntity(e: Entity, name: string): Entity {
-  const copy = structuredClone(e);
-  copy.id = newId();
-  copy.name = name;
-  return copy;
-}
 
 /**
  * Move (and copy) the selection: pick a base point, then a destination.
@@ -64,7 +57,7 @@ export class MoveTool extends Tool {
     if (this.state === 'idle') {
       const inf = this.ctx.snapper.freePoint(e.px);
       this.showInference(inf);
-      if (!this.doc.selection.size) this.viewport.setHover(inf?.hit?.entity.id ?? null);
+      if (!this.doc.selection.size) this.viewport.setHighlighted(inf?.hit ? this.unitOf(inf.hit.entity) : []);
       return;
     }
     if (e.px.distanceTo(this.downPx) > 4) this.dragged = true;
@@ -136,10 +129,10 @@ export class MoveTool extends Tool {
     this.autoSelected = false;
     if (!this.doc.selection.size || (inf.hit && !this.doc.selection.has(inf.hit.entity.id) && !e.mod)) {
       if (!inf.hit) return;
-      this.doc.setSelection([inf.hit.entity.id]);
+      this.doc.setSelection(this.unitOf(inf.hit.entity));
       this.autoSelected = true;
     }
-    this.viewport.setHover(null);
+    this.viewport.setHighlighted([]);
     this.sourceIds = this.doc.selected().map((s) => s.id);
     this.originals = new Map(this.doc.selected().map((s) => [s.id, [...s.position] as Vec3]));
     this.base.copy(inf.point);
@@ -157,15 +150,13 @@ export class MoveTool extends Tool {
     if (this.state === 'moving' && this.dragged && e.button === 0) this.finish();
   }
 
+  private sources(): Entity[] {
+    return this.sourceIds.map((id) => this.doc.get(id)).filter((e): e is Entity => !!e);
+  }
+
+  /** Copies come back in source order, which applyDelta relies on. Whole groups copy as new groups. */
   private makeClones() {
-    this.cloneIds = [];
-    for (const id of this.sourceIds) {
-      const src = this.doc.get(id);
-      if (!src) continue;
-      const c = cloneEntity(src, src.name);
-      this.doc.add(c);
-      this.cloneIds.push(c.id);
-    }
+    this.cloneIds = copyEntities(this.doc, this.sources(), () => {}).map((c) => c.id);
   }
 
   private setCopy(on: boolean) {
@@ -189,29 +180,12 @@ export class MoveTool extends Tool {
     }
     const copies = this.copy ? [...this.cloneIds] : [];
     this.last = { sourceIds: [...this.sourceIds], delta: this.delta.clone(), copies };
-    if (copies.length) this.renameCopies(copies);
     this.doc.commit();
     this.markRetype();
     if (copies.length) this.doc.setSelection(copies);
     else if (this.autoSelected) this.doc.clearSelection();
     this.reset();
     this.ctx.setMeasurement('Distance', this.fmtValue(this.last.delta.length()));
-  }
-
-  /** Give copies their own numbered names (Board → Board 2) for a readable cut list. */
-  private renameCopies(ids: string[]) {
-    for (const id of ids) {
-      const e = this.doc.get(id);
-      if (!e) continue;
-      const stem = e.name.replace(/\s+\d+$/, '');
-      const re = new RegExp(`^${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?: (\\d+))?$`);
-      let max = 1;
-      for (const other of this.doc.entities) {
-        const m = re.exec(other.name);
-        if (m && other.id !== id) max = Math.max(max, m[1] ? parseInt(m[1], 10) : 1);
-      }
-      e.name = `${stem} ${max + 1}`;
-    }
   }
 
   value(text: string): boolean {
@@ -265,17 +239,13 @@ export class MoveTool extends Tool {
     const created: string[] = [];
     this.doc.transact(() => {
       this.doc.remove(last.copies);
+      const sources = last.sourceIds.map((id) => this.doc.get(id)).filter((e): e is Entity => !!e);
       for (let k = 1; k <= count; k++) {
-        for (const id of last.sourceIds) {
-          const src = this.doc.get(id);
-          if (!src) continue;
-          const c = cloneEntity(src, src.name);
-          c.position = cleanVec(new THREE.Vector3(...src.position).addScaledVector(step, k));
-          this.doc.add(c);
-          created.push(c.id);
-        }
+        const copies = copyEntities(this.doc, sources, (c) => {
+          c.position = cleanVec(new THREE.Vector3(...c.position).addScaledVector(step, k));
+        });
+        created.push(...copies.map((c) => c.id));
       }
-      this.renameCopies(created);
     });
     last.copies = created;
     this.markRetype();

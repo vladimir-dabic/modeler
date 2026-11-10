@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import type { ModelDocument } from '../model/Document';
 import { groundPlane, planeFromFace, planeFromNormal, type DrawPlane } from '../model/geometry';
-import type { Unit } from '../model/types';
+import { selectionUnit } from '../model/groups';
+import type { Entity, Unit } from '../model/types';
 import type { WorkspaceConfig } from '../model/workspaces';
 import { formatLength } from '../model/units';
 import { Overlay } from '../viewport/overlay';
@@ -128,6 +129,11 @@ export abstract class Tool {
   /** A value typed into the measurement box. Return true if accepted. */
   value(_text: string): boolean {
     return false;
+  }
+
+  /** What clicking `e` selects: its whole group (or the part, inside an open group). ADR 0011. */
+  protected unitOf(e: Entity): string[] {
+    return selectionUnit(e, this.doc.entities, this.doc.groups, this.doc.openGroupId);
   }
 
   private retypeVersion = -1;

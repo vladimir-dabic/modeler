@@ -4,6 +4,7 @@ import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRe
 import { buildCutGeometry, cuttersFor } from '../model/csg';
 import type { ModelDocument } from '../model/Document';
 import { entityMatrix, worldBoundsOf } from '../model/geometry';
+import { isInsideGroup } from '../model/groups';
 import type { Entity } from '../model/types';
 import type { WorkspaceConfig } from '../model/workspaces';
 import { featureEdges } from './edges';
@@ -404,6 +405,55 @@ export class Viewport {
     this.updateStyles();
   }
 
+  // ---- off-screen images (Modeler API render_views) -------------------------
+
+  /**
+   * Render PNGs (base64, no data: prefix) of the visible model from standard views,
+   * off-screen, without touching the user's camera or canvas size.
+   */
+  async renderViewImages(views: ViewName[], size: number): Promise<{ view: ViewName; png: string }[]> {
+    const target = new THREE.WebGLRenderTarget(size, size, { samples: 4 });
+    target.texture.colorSpace = THREE.SRGBColorSpace;
+    const cam = new THREE.PerspectiveCamera(FOV, 1, 1, 1e6);
+    cam.up.set(0, 0, 1);
+    const list = this.doc.entities.filter((e) => e.visible);
+    const box = list.length ? worldBoundsOf(list) : this.homeBox.clone();
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const radius = Math.max(sphere.radius, 10);
+    const hidden = [this.overlayRoot, this.faceHighlight].filter((o) => o.visible);
+    hidden.forEach((o) => (o.visible = false));
+    const pixels = new Uint8Array(size * size * 4);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const ctx2d = canvas.getContext('2d')!;
+    const out: { view: ViewName; png: string }[] = [];
+    try {
+      for (const view of views) {
+        const dir = VIEW_DIRS[view].clone().normalize();
+        const dist = (radius / Math.sin((FOV * Math.PI) / 360)) * 1.1;
+        cam.position.copy(sphere.center).addScaledVector(dir, dist);
+        cam.lookAt(sphere.center);
+        cam.near = dist / 100;
+        cam.far = dist * 10;
+        cam.updateProjectionMatrix();
+        this.renderer.setRenderTarget(target);
+        this.renderer.render(this.scene, cam);
+        this.renderer.readRenderTargetPixels(target, 0, 0, size, size, pixels);
+        // WebGL rows are bottom-up; flip into the 2D canvas.
+        const img = ctx2d.createImageData(size, size);
+        for (let y = 0; y < size; y++) img.data.set(pixels.subarray((size - 1 - y) * size * 4, (size - y) * size * 4), y * size * 4);
+        ctx2d.putImageData(img, 0, 0);
+        out.push({ view, png: canvas.toDataURL('image/png').split(',')[1] });
+      }
+    } finally {
+      this.renderer.setRenderTarget(null);
+      hidden.forEach((o) => (o.visible = true));
+      target.dispose();
+      this.requestRender();
+    }
+    return out;
+  }
+
   // ---- rendering ----------------------------------------------------------
 
   requestRender() {
@@ -495,6 +545,13 @@ export class Viewport {
       m.emissive.set(selected ? 0x1d4ed8 : hovered ? this.highlightColor : 0x000000);
       m.emissiveIntensity = selected ? 0.18 : hovered ? 0.14 : 0;
       m.needsUpdate = true;
+      // While a group is open for editing, everything outside it fades back.
+      const outside = !!this.doc.openGroupId && !isInsideGroup(e, this.doc.openGroupId, this.doc.groups);
+      if (outside) {
+        m.transparent = true;
+        m.opacity = Math.min(m.opacity, 0.25);
+        m.depthWrite = false;
+      }
       const warn = this.warningIds.has(e.id);
       const edgeColor = selected ? COLORS.selection : hovered ? this.highlightColor : warn ? COLORS.erase : e.hole ? COLORS.hole : COLORS.edge;
       if (warn && !selected && !hovered) {

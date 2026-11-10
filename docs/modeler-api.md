@@ -1,225 +1,180 @@
 # Modeler API
 
-> **Status:** designed, not yet implemented. The decision is [ADR 0008](adr/0008-modeler-api-single-entry-point.md). This document is the specification to build against. Update it as the implementation lands.
+> **Status:** implemented in `src/api` ([ADR 0008](adr/0008-modeler-api-single-entry-point.md), [ADR 0010](adr/0010-token-efficient-api.md)). Every operation with all its fields is listed in the generated **[API reference](api-reference.md)**. This page explains the design and conventions.
 
-The Modeler API is the **single way to change the model**. It's a set of named, typed, validated **operations** on a `ModelDocument`. Three kinds of client use exactly the same operations:
+The Modeler API is the **single way to change the model**: a set of named, typed, validated **operations** on a `ModelDocument`. Three kinds of client use exactly the same operations:
 
 | Client | How it calls the API |
 |---|---|
-| UI (sidebar, top bar, commands) | directly, `api.call('set_hole', {...})` |
-| In-app AI assistant | as Claude **tools**: each operation becomes a tool definition |
-| MCP server | as MCP **tools**: same names, same schemas |
+| UI (sidebar, commands, right-click menu) | `app.uiCall('set_hole', {...}, 'Make hole')`, a thin wrapper over `api.call` that turns errors into toasts |
+| In-app AI assistant (planned) | as Claude **tools**: `api.toolDefinitions()` |
+| MCP server (planned) | as MCP **tools**: same names, schemas and descriptions |
 
-If a capability exists for one client, it exists for all of them. A feature isn't done until it's an operation.
+If a capability exists for one client, it exists for all of them. A model-changing feature isn't done until it's an operation.
 
 ## Design principles
 
-1. **Parametric and explicit.** Operations speak in parts and dimensions (`add_box {size: [18, 300, 720]}`), never in vertices or mouse positions. Nothing depends on the camera or hidden UI state; the selection is explicit state you read and set.
+1. **Parametric and explicit.** Operations speak in parts and dimensions (`add_box {size: [18, 300, 720]}`), never in vertices or mouse positions. Nothing depends on the camera; the selection is explicit state (`get_selection` / `set_selection`).
 2. **Millimetres and degrees, Z-up**, always. Clients convert units for display; the API never does.
-3. **Validated at the boundary.** Every input is checked against a schema before anything is touched. Invalid input changes nothing and returns an error that says *how to fix it*.
-4. **Atomic and undoable.** One call, or one `apply_operations` batch, is one transaction and one undo step. If any operation in a batch fails, none of it is applied.
-5. **Self-describing.** Each operation carries a description written for an AI reader (what it does, when to use it, units, an example) and a JSON Schema generated from the same source as the validator.
-6. **Feedback in every result.** Writes return what changed (ids, new bounds) and any warnings, such as print-fit problems in the Print workspace. A client, human or AI, can verify the result without a second call.
-7. **DOM-free.** The API lives next to the model layer and runs in Node. Capabilities that need a screen (rendering views) are injected by the host; in a headless host they return `unsupported`.
-8. **Additive evolution.** New operations and optional fields can be added freely. Renaming or removing one needs a new ADR, because saved AI prompts and MCP configs depend on the names.
-9. **Few calls, few tokens** ([ADR 0010](adr/0010-token-efficient-api.md)). Every round trip re-sends the conversation, so one call should express a whole intent: "4 shelves evenly spaced between the bottom and the top" is **one** call, not eight. See [Token efficiency](#token-efficiency).
+3. **Validated at the boundary.** Inputs are checked against Zod schemas before anything is touched, and every part a write changed is validated again afterwards (`validateEntity`). Invalid input changes nothing and returns an error that says how to fix it.
+4. **Atomic and undoable.** One write call, or one `apply_operations` batch, is one transaction and one undo step, optionally labelled (`{ label: 'AI: add 4 shelves' }`). If anything fails, the document is rolled back.
+5. **Self-describing.** Each operation carries a description written for an AI reader. Its JSON Schema is generated from the same Zod schema that validates it, so the docs, the AI tools and the runtime can't disagree.
+6. **Feedback in every result.** Writes return what changed and any warnings (print-fit problems in the Print workspace), so a client can verify without a second call.
+7. **DOM-free.** `src/api` imports only `src/model`, so it runs in Node (headless MCP, tests). Capabilities that need a screen (`render_views`) come from an injected host.
+8. **Additive evolution.** New operations and optional fields are fine. Renaming or removing one needs an ADR, because saved prompts and MCP configs depend on the names.
+9. **Few calls, few tokens** (ADR 0010). One call should express a whole intent. See [Token efficiency](#token-efficiency).
 
-## Shape of the code (planned)
+## Code map
+
+```
+src/api/
+  schemas.ts      shared Zod schemas: Vec3, Size3, Target (selectors), Pattern, Color…
+  core.ts         ApiError + error codes, results, ApiHost, OperationContext (target
+                  resolution, "units" of grouped parts), compact formatting, validateEntity
+  operations.ts   every operation: name, kind, AI-readable description, schema, run
+  ModelerApi.ts   call / callAsync / toolDefinitions; transactions, rollback, change
+                  summaries, warnings; apply_operations with $aliases
+  reference.ts    generates docs/api-reference.md
+  guide.ts        how an AI should use the API (MCP instructions; in-app system prompt)
+  index.ts        public exports
+```
 
 ```ts
-// src/api/ (planned): imports only from src/model
-export interface OperationDef<I, O> {
-  name: string;               // snake_case; also the Claude tool name and MCP tool name
-  description: string;        // written for an AI reader
-  kind: 'read' | 'write';
-  input: ZodType<I>;          // validation + JSON Schema (single source of truth)
-  run(ctx: OperationContext, input: I): O;
-}
-
-export class ModelerApi {
-  constructor(doc: ModelDocument, host?: ApiHost) {}
-  operations(): OperationDef<unknown, unknown>[];          // for tool lists
-  call(name: string, input: unknown, meta?: CallMeta): ApiResult;
-  apply(calls: { name: string; input: unknown }[], meta?: CallMeta): ApiResult; // atomic batch
-}
-
-export interface CallMeta {
-  source: 'ui' | 'assistant' | 'mcp';
-  label?: string;             // undo-history label, e.g. "AI: add 5 shelves"
-}
-
-export interface ApiHost {   // optional host capabilities
-  renderViews?(views: ViewName[], size: number): Promise<{ view: ViewName; png: string }[]>;
-}
+const api = new ModelerApi(doc, { renderViews, files });  // host is optional
+api.call('add_box', { name: 'Side', size: [18, 300, 700] }, { source: 'ui', label: 'Add side' });
+await api.callAsync('render_views', { views: ['iso'] });  // host operations are async
+api.toolDefinitions();                                     // [{ name, description, input_schema }]
 ```
+
+### Operation kinds
+
+| Kind | Meaning |
+|---|---|
+| `read` | never changes the model (`get_*`, `measure`, `check_print`, also `set_selection`, which is UI state) |
+| `write` | one transaction / undo step; validated; rolled back on error; returns `{ ids }` |
+| `settings` | document settings that are saved but not undoable (`set_workspace`, `set_printer`); the app reacts via `doc.onSettingsChange` |
+| `history` | `undo`, `redo` |
+| `host` | needs a host capability, called with `callAsync`: `render_views` (`host.renderViews`, the app), `open_file` / `save_file` / `export_stl` (`host.files`, only the MCP server, limited to its working folder: [ADR 0013](adr/0013-mcp-server-bridge-and-files.md)). Without the capability they return `unsupported` |
 
 ### Results
 
 ```ts
-type ApiResult<T = unknown> =
-  | { ok: true; data: T; changes?: ChangeSummary; warnings?: Warning[] }
+type ApiResult =
+  | { ok: true; data: unknown; changes?: ChangeSummary; warnings?: string[] }
   | { ok: false; error: { code: ErrorCode; message: string; hint?: string; path?: string } };
 
-type ErrorCode =
-  | 'invalid_input'     // schema validation failed (path says where)
-  | 'not_found'         // unknown entity id / name
-  | 'ambiguous'         // a name matched several entities; hint lists their ids
-  | 'invalid_geometry'  // e.g. outline with zero area, size ≤ 0
-  | 'unsupported';      // e.g. render_views in a headless host
+type ErrorCode = 'invalid_input' | 'not_found' | 'ambiguous' | 'invalid_geometry' | 'unsupported' | 'internal';
 
-interface ChangeSummary {
-  added: EntitySummary[];
-  updated: EntitySummary[];
-  removed: string[];          // ids
+interface ChangeSummary {      // compact lines, not full JSON (token efficiency)
+  added: string[];             // 'k3f9a2 "Shelf 2" box 564×280×18 at 18,0,180 in "Bookcase"'
+  updated: string[];
+  removed: string[];           // 'k3f9a2 "Shelf 2"'
+  groups_added?: string[];
+  groups_removed?: string[];
 }
 ```
 
-Error messages are written so an AI can recover without a human. Example: `"size[2] must be > 0 (got -18). To make a hole into a face, create a positive size and set hole: true."`
+Errors are written for recovery without a human, for example:
 
-### Entity summary (the compact form every read returns)
-
-```json
-{ "id": "k3f9a2", "name": "Side", "kind": "box", "hole": false,
-  "position": [0, 0, 0], "rotation": [0, 0, 0], "size": [18, 300, 720],
-  "bounds": { "min": [0, 0, 0], "max": [18, 300, 720] }, "color": "#e6d3ad" }
-```
-
-Cylinders carry `radius`, `height`, `segments`; extrusions carry `points` and `height`. Bounds are world-space, so a client can reason about touching or overlapping without re-deriving geometry.
+- `ambiguous`: `2 parts are named "Shelf"`, with the hint *Use ids (a1, b2) or a wildcard like "Shelf*" to mean all of them.*
+- a failed batch says which step: `step 3 (add_box): size.1: Too small: expected number to be >0`, with `path: operations.2.input.size.1`.
 
 ### Targeting entities (selectors)
 
-Operations that act on existing parts take a **target**. A selector can pick many parts at once, so the AI never has to list ids it can describe:
-
 ```ts
 type Target =
-  | { ids: string[] }
+  | { ids: string[] }          // part ids, or group ids (= all their members)
   | { selection: true }
-  | { group: string }                 // all members of a group (by id or name)
-  | { name: string }                  // exact, case-insensitive; '*' wildcard: "Shelf *"
-  | { kind?: EntityKind; hole?: boolean; in_group?: string; all?: true }; // filters, combined with AND
+  | { group: string }          // group id or exact name
+  | { name: string }           // exact, case-insensitive; '*' wildcard: "Shelf *"
+  | { all?: true; kind?: 'box'|'cylinder'|'extrusion'; hole?: boolean; in_group?: string };
 ```
 
-Examples: `{ "name": "Shelf *" }`, `{ "hole": true, "in_group": "Lid" }`, `{ "all": true }`.
-
-A selector that matches **nothing** is a `not_found` error. A plain `name` (no wildcard) that matches **several** parts is `ambiguous`, and the error lists the candidates, so nothing is ever changed by guesswork. Wildcards and filters are explicit about wanting many.
-
-## Operation catalogue (v1)
-
-### Read
-
-| Operation | Input | Returns |
-|---|---|---|
-| `get_scene` | `{ detail?: 'outline'\|'compact'\|'full', include_hidden?: boolean }` | workspace, units, printer, overall bounds, entities; groups collapsed to one line in `outline` (see [compact output](#compact-output)) |
-| `get_entities` | `Target` | full summaries |
-| `get_selection` | — | selected ids + summaries |
-| `measure` | `{ from: Point, to: Point }` or `{ between: [id, id] }` | distance, dx/dy/dz, gap between parts |
-| `check_print` | — | fit issues, size, volume (cm³), weight per filament |
-| `get_cut_list` | — | grouped rows (T × W × L, qty, names) |
-| `get_quantities` | — | per-object footprint m², volume m³, totals |
-
-### Write
-
-| Operation | Input (all mm / degrees) | Notes |
-|---|---|---|
-| `add_box` | `{ name?, position?, size, rotation?, color?, hole? }` | position = min corner, default origin |
-| `add_cylinder` | `{ name?, position?, radius \| diameter, height, axis?: 'x'\|'y'\|'z', segments?, color?, hole? }` | position = base centre |
-| `add_shape` | `{ name?, position?, points: [x,y][], height, rotation?, color?, hole? }` | closed outline, ≥ 3 points |
-| `update_entity` | `{ id, set: Partial<{name, position, rotation, size, radius, height, segments, points, color, hole, visible}> }` | validated as a whole after the patch |
-| `delete_entities` | `Target` | |
-| `duplicate` | `{ target, pattern?: Pattern, group_copies?: boolean }` | one call makes any number of copies; see [patterns](#patterns) |
-| `mirror` | `{ target, plane: 'x'\|'y'\|'z', about?: number \| id, keep_original?: boolean }` | left/right symmetric parts in one call |
-| `move` | `{ target, by?: Vec3, to?: Vec3, anchor?: 'min'\|'center'\|'max' }` | `to` places the target's anchor at a point |
-| `place` | `{ target, relative_to: Target, side: 'top'\|'bottom'\|'left'\|'right'\|'front'\|'back'\|'inside_bottom', align?: 'min'\|'center'\|'max', gap?: number }` | "put the lid on top of the box, centred" without computing coordinates |
-| `distribute` | `{ target, count?, between?: [Target, Target], axis, mode: 'even'\|'spacing', spacing?: number }` | evenly space parts (shelves, slats, fence posts); with `count`, copies the target until there are that many first |
-| `rotate` | `{ target, angle, axis?: 'x'\|'y'\|'z', pivot?: Vec3 \| 'center' \| 'min' }` | pivot defaults to the target's centre |
-| `align` | `{ target, to: Target, axis, mode: 'min'\|'center'\|'max' }` | line up edges or centres |
-| `group` | `{ target, name? }` | returns the new group id ([ADR 0011](adr/0011-groups-as-flat-membership.md)) |
-| `ungroup` | `{ group }` | members stay where they are |
-| `set_hole` | `{ target, hole: boolean }` | |
-| `place_on_plate` | `{ target? }` | Print workspace; centres on the bed, z = 0 |
-| `set_selection` | `Target \| { clear: true }` | |
-| `set_workspace` | `{ workspace: 'print'\|'workshop'\|'build' }` | document setting, not undoable |
-| `set_printer` | `{ profile } \| { custom: Vec3 }` | |
-| `apply_operations` | `{ operations: { name, input, as?: string }[] }` | atomic batch, one undo step; later steps can use `"$alias"` (see [references](#references-inside-a-batch)) |
-| `undo` / `redo` | — | |
-
-### View and files (host-dependent)
-
-| Operation | Input | Notes |
-|---|---|---|
-| `render_views` | `{ views?: ('iso'\|'top'\|'front'\|'right')[], size?: number }` | PNG images for visual self-checks. Browser host only |
-| `export_stl` | `{ target? }` | browser: download; headless: write file / return base64 |
-| `open_file` / `save_file` | `{ path }` | headless MCP host only |
+- **No match** is a `not_found` error, listing names that do exist.
+- **A plain name that matches several parts** is `ambiguous`, and the error lists their ids. Wildcards and filters are explicit about wanting many, so nothing is ever changed by guesswork.
+- **Grouped parts move as one:** operations that move things (`distribute`, …) keep a group together when *all* its members are targeted.
 
 ## Token efficiency
 
-Each call costs a model round trip: the whole conversation is re-read and a new response generated. The API is designed so an intent maps to **one** call.
+Each call costs a model round trip, so the API is built so an intent maps to **one** call.
 
 ### Patterns
 
-`duplicate` takes a pattern, so arrays are one call:
+`duplicate` takes a pattern; **counts include the original**:
 
 ```ts
 type Pattern =
-  | { linear: { count: number; step: Vec3 } }                    // 5 slats, 120 mm apart
-  | { linear: { count: number; span: Vec3 } }                    // 5 copies spread over 480 mm
-  | { grid: { counts: [nx, ny, nz?]; step: Vec3 } }              // 3 × 4 pegboard holes
-  | { radial: { count: number; axis: 'x'|'y'|'z'; center?: Vec3; angle?: number } } // 6 bolt holes on a circle
-  | { offsets: Vec3[] };                                         // arbitrary copies
+  | { linear: { count: number; step?: Vec3; span?: Vec3 } }        // step OR span
+  | { grid: { counts: [nx, ny] | [nx, ny, nz]; step: Vec3 } }
+  | { radial: { count: number; axis?: 'x'|'y'|'z'; center?: Vec3; angle?: number } }
+  | { offsets: Vec3[] };
 ```
 
-`{ "name": "duplicate", "input": { "target": { "name": "Bolt hole" }, "pattern": { "radial": { "count": 6, "axis": "z", "center": [50, 50, 0] } } } }` makes six holes on a bolt circle in one call.
+`{ "target": { "name": "Bolt hole" }, "pattern": { "radial": { "count": 6, "center": [50, 50, 0] } } }` gives six holes on a bolt circle. Groups whose members are all copied are copied as new groups (`Drawer` → `Drawer 2`).
+
+### Intent-level operations
+
+- **`place`:** put parts against another part (top/bottom/left/right/front/back, a gap, and an alignment on the other axes).
+- **`distribute`:** space parts evenly along an axis, optionally `between` two references; `count` creates the copies first.
+- **`mirror`:** reflect about a plane given by a coordinate or by a part's centre.
+- **`align`:** line up min, centre or max on one axis.
+
+None of them needs coordinate arithmetic from the client.
 
 ### References inside a batch
 
-`apply_operations` lets a step name its result with `as` and later steps refer to it as `"$name"`. A whole assembly is then built in **one** call without waiting for ids:
+`apply_operations` names a step's result with `as`; later steps use `"$name"`. Inside an `ids` list an alias expands to all its ids; elsewhere (`about`, `group`) it must refer to exactly one. This builds a whole bookcase in **one** call and one undo step; it's covered by `tests/api.test.ts`:
 
 ```json
 { "operations": [
   { "name": "add_box", "as": "bottom", "input": { "name": "Bottom", "position": [0, 0, 0], "size": [600, 300, 18] } },
   { "name": "add_box", "as": "left",   "input": { "name": "Side", "position": [0, 0, 18], "size": [18, 300, 700] } },
-  { "name": "mirror",  "as": "right",  "input": { "target": { "ids": ["$left"] }, "plane": "x", "about": "$bottom", "keep_original": true } },
+  { "name": "mirror",  "as": "right",  "input": { "target": { "ids": ["$left"] }, "plane": "x", "about": "$bottom" } },
   { "name": "add_box", "as": "top",    "input": { "name": "Top", "size": [600, 300, 18] } },
   { "name": "place",   "input": { "target": { "ids": ["$top"] }, "relative_to": { "ids": ["$left"] }, "side": "top", "align": "min" } },
   { "name": "add_box", "as": "shelf",  "input": { "name": "Shelf", "position": [18, 0, 0], "size": [564, 280, 18] } },
-  { "name": "distribute", "as": "shelves", "input": { "target": { "ids": ["$shelf"] }, "count": 4, "between": [{ "ids": ["$bottom"] }, { "ids": ["$top"] }], "axis": "z", "mode": "even" } },
+  { "name": "distribute", "as": "shelves", "input": { "target": { "ids": ["$shelf"] }, "count": 4, "between": [{ "ids": ["$bottom"] }, { "ids": ["$top"] }], "axis": "z" } },
   { "name": "group", "input": { "target": { "ids": ["$bottom", "$left", "$right", "$top", "$shelves"] }, "name": "Bookcase" } }
 ] }
 ```
 
-Eight steps, one call, one undo step: a complete bookcase. Done one operation at a time, this would be about eight model round trips.
-
-An alias that refers to several parts (like `$shelves`) expands to all of them.
+History (`undo`/`redo`), host operations and nested batches can't run inside a batch. An optional `"label": "bookcase"` names the batch's undo step (the MCP server shows it as `AI: Bookcase`).
 
 ### Compact output
 
-- **Writes return only what changed**: added/updated summaries and removed ids. The model is never echoed back.
-- **Numbers are rounded** to 0.01 mm / 0.01° in output.
+- **Writes return only what changed,** as one line per part; numbers are rounded to 0.01.
 - **`get_scene` detail levels:**
-  - `outline`: one line per top-level part or group (`Bookcase [group, 8 parts] 600×300×736 at 0,0,0`);
-  - `compact` (default): one short line per part;
-  - `full`: complete summaries as JSON.
-
-  Large models should be read in `outline` first, then expanded with `get_entities { group: ... }`.
+  - `outline`: one line per top-level group (`"Bookcase" [group, 8 parts] 600×300×736 at 0,0,0`);
+  - `compact` (default): one line per part;
+  - `full`: complete JSON.
 - **Defaults instead of parameters:**
-  - names are auto-numbered ("Shelf 2");
+  - names auto-number;
   - colour, cylinder smoothness and units come from the workspace;
-  - `rotation` defaults to 0.
-
-  The AI writes only what matters.
-- **Errors are short:** a code, one sentence, and a hint.
+  - `position` defaults to the origin, `rotation` to 0.
 
 ## Writing operation descriptions (for AI readers)
 
 Each description should answer, briefly:
 1. **What it does**, in one sentence.
-2. **When to use it** vs. a neighbour (e.g. `move` vs. `align`).
+2. **When to use it** vs. a neighbour (e.g. `move` vs. `place`).
 3. **Units and conventions**: mm, which corner `position` refers to.
 4. **One concrete example input.**
 
-Keep them stable: the tool definitions are prompt-cached (see [AI integration](ai-integration.md)), so a reworded description costs a cache rebuild.
+Keep them stable: tool definitions are prompt-cached by AI clients, so a reworded description costs a cache rebuild. After changing one, run `npm run docs:api` (a test fails if the reference is stale).
 
 ## Testing
 
-- Every operation gets unit tests in Node: valid input, each error code, undo restores the previous state.
-- **Scenario tests** replay realistic AI call sequences ("bookcase with 4 shelves", "box with M3 screw holes") and assert the resulting model. These double as regression tests for the AI integration without calling a model.
+- **`tests/api.test.ts`:**
+  - each operation's success path, and its errors (`invalid_input`, `ambiguous`, `not_found`, `invalid_geometry`);
+  - batch rollback and step-numbered errors;
+  - group copy and nesting;
+  - print warnings, settings events;
+  - the bookcase scenario;
+  - every operation has a description and a JSON Schema.
+- **`tests/api-reference.test.ts`:** fails if [api-reference.md](api-reference.md) doesn't match the code.
+- **The smoke test** runs a batch in the real app, checks it's one labelled undo step, and renders views. Step 17 does the same through the built MCP server over the live bridge.
+- **`tests/mcp.test.ts`:** the MCP server in-process (both modes, files, bridge security).
+
+## Not yet implemented
+
+- Interactive tools (ADR 0004) still mutate the document directly during drags, and their committed results aren't yet run through `validateEntity`.

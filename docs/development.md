@@ -14,8 +14,10 @@ npm run dev          # http://localhost:5173 (hot reload)
 | `npm run dev` | Vite dev server |
 | `npm test` | vitest unit tests in `tests/` (Node, no browser) |
 | `npm run smoke` | end-to-end test: drives the real UI in headless Chrome. **Needs `npm run dev` running.** Screenshots go to `test-results/` (ignored); `node scripts/smoke.mjs <dir>` writes elsewhere |
-| `npm run typecheck` | `tsc --noEmit` over `src`, `tests`, `vite.config.ts` |
+| `npm run typecheck` | `tsc --noEmit` over `src`, `tests`, `mcp/src`, `vite.config.ts` |
 | `npm run build` | type-check + production build into `dist/` |
+| `npm run docs:api` | regenerate `docs/api-reference.md` from the operation definitions |
+| `npm run build:mcp` | bundle the MCP server into `mcp/dist/modeler-mcp.mjs` (rebuild after changing `src/api`, `src/model` or `mcp/src`); see [mcp/README.md](../mcp/README.md) |
 
 `window.modeler` is the live `App` instance in the browser console. It's useful for debugging (`modeler.doc.entities`, `modeler.viewport.zoomExtents()`) and is what the smoke test uses.
 
@@ -24,9 +26,10 @@ npm run dev          # http://localhost:5173 (hot reload)
 | Layer | How it's tested |
 |---|---|
 | `src/model/*`, `src/keymap.ts`, `src/viewport/edges.ts` | **Unit tests** (`tests/*.test.ts`). Pure functions, fast; add a test with every change |
+| MCP server, bridge, file host | **`tests/mcp.test.ts`**: in-process server + a Node "tab" running the real `BridgeClient` |
 | Tools, viewport, UI wiring | **Smoke test** (`scripts/smoke.mjs`). Real mouse and keyboard in headless Chrome; asserts on `window.modeler.doc` |
 | Visual changes | Run `node scripts/smoke.mjs <dir>` or a small Playwright script and **look at the screenshots** |
-| Modeler API (planned) | Unit tests per operation + scenario tests replaying AI-style call sequences |
+| Modeler API (`src/api`) | `tests/api.test.ts`: per operation + scenario tests (e.g. the bookcase batch); `tests/api-reference.test.ts` keeps the generated reference current |
 
 Before calling a change done: `npm run typecheck && npm test && npm run smoke` (with the dev server running).
 
@@ -34,8 +37,8 @@ Before calling a change done: `npm run typecheck && npm test && npm run smoke` (
 
 - **mm, Z-up, degrees** everywhere in the model. Convert only for display (`formatLength` / `parseLength`).
 - **Clean numbers:** store results through `cleanNumber` / `cleanVec`, so the UI shows `600`, not `599.9999999`.
-- **Model layer stays DOM-free:** nothing in `src/model` imports from `viewport`, `ui`, `tools` or browser globals (the exception is `localStorage` helpers in `io.ts`, guarded by try/catch). The planned `src/api` follows the same rule.
-- **All model changes go through `ModelDocument`** (and, once it exists, the Modeler API): `begin`/`commit`/`cancel`, `transact`, `add`/`remove`/`update`. One user action = one undo step.
+- **Model layer stays DOM-free:** nothing in `src/model` imports from `viewport`, `ui`, `tools` or browser globals (the exception is `localStorage` helpers in `io.ts`, guarded by try/catch). `src/api` and `src/bridge/protocol.ts` follow the same rule; the MCP server (`mcp/`) imports them in Node.
+- **Model changes from UI code go through the Modeler API** (`app.uiCall`). Only interactive tools mutate `ModelDocument` directly, inside a transaction, for live previews. One user action = one undo step.
 - **No hard-coded shortcuts.** Every action is a command in `src/commands.ts`, run via `App.runCommand`.
 - **Workspace behaviour comes from configuration** (`WORKSPACES[...]`, `app.workspace`, `ctx.workspace()`), not from scattered `if (workspace === 'print')` checks.
 - **Comments explain *why*,** not what. User-facing text is plain and specific ("is 300 mm tall — the printer reaches 256 mm").
@@ -43,13 +46,22 @@ Before calling a change done: `npm run typecheck && npm test && npm run smoke` (
 
 ## Recipes
 
-### Add a Modeler API operation (planned layer)
+### Add a Modeler API operation
 
-1. Define the input schema and an AI-oriented description ([how to write it](modeler-api.md#writing-operation-descriptions-for-ai-readers)).
-2. Implement `run` against `ModelDocument` inside a transaction, validating the final state.
-3. Return a `ChangeSummary` and warnings; use the shared error codes with a recovery hint.
-4. Unit-test valid input, each error, and undo.
-5. Add it to the catalogue in [modeler-api.md](modeler-api.md). It's now automatically available to the UI, the assistant and MCP.
+1. In `src/api/operations.ts`, add a `def({ name, kind, description, input, run })`:
+   - the input schema uses the shared pieces in `schemas.ts` (`Target`, `Vec3`, `Size3`, `Pattern`…);
+   - the description follows [the guidelines](modeler-api.md#writing-operation-descriptions-for-ai-readers).
+2. In `run`:
+   - resolve parts with `ctx.resolve(target)`;
+   - mutate through `ctx.doc` (`add`, `update`, `remove`, `setGroups`);
+   - throw `ApiError(code, message, hint)` for anything the caller can fix;
+   - return `{ ids }` for write operations.
+
+   The API handles the transaction, validation, rollback, change summary and warnings.
+3. Add it to `OPERATIONS`, then unit-test it in `tests/api.test.ts` (success, each error, undo).
+4. Run `npm run docs:api` to regenerate [api-reference.md](api-reference.md); a test fails if you forget.
+5. If the UI needs it, call it with `app.uiCall(name, input, label)`. It's automatically available to the AI assistant and MCP (run `npm run build:mcp` so the bundled server picks it up).
+6. If the AI should use it in a particular way, add a line to `src/api/guide.ts`.
 
 ### Add a command (keyboard-bindable action)
 

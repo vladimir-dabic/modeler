@@ -116,7 +116,7 @@ export class RotateTool extends Tool {
       this.autoSelected = false;
       if (!this.doc.selection.size) {
         if (!inf.hit) return;
-        this.doc.setSelection([inf.hit.entity.id]);
+        this.doc.setSelection(this.unitOf(inf.hit.entity));
         this.autoSelected = true;
       }
       this.plane = this.pivotPlane(inf.point, inf.hit?.normal ?? null);

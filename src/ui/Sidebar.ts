@@ -3,7 +3,8 @@ import { buildWorldGeometries } from '../model/csg';
 import { buildCutList } from '../model/cutlist';
 import type { ModelDocument } from '../model/Document';
 import { polygonArea, worldBounds, worldBoundsOf } from '../model/geometry';
-import type { Entity, Vec3 } from '../model/types';
+import { groupChain, groupForSelection, groupMembers } from '../model/groups';
+import type { Entity, Group, Vec3 } from '../model/types';
 import { formatLength, parseAngle, parseLength, trimNumber } from '../model/units';
 import {
   FILAMENTS,
@@ -35,6 +36,9 @@ export interface SidebarActions {
   setFilament(id: string): void;
   placeOnPlate(ids: string[]): void;
   exportStl(): void;
+  /** Run a Modeler API operation; false (and a toast) if it was rejected. */
+  call(name: string, input: unknown, label?: string): boolean;
+  runCommand(id: string): void;
 }
 
 type Tab = PanelId;
@@ -61,6 +65,8 @@ export class Sidebar {
   /** Mesh volumes (mm³, holes applied) per entity, computed when the model is idle. */
   private volumeCache: { version: number; byId: Map<string, number> } | null = null;
   private volumeTimer = 0;
+  /** Groups collapsed in the Objects tree (UI only). */
+  private readonly collapsed = new Set<string>();
 
   constructor(
     private readonly doc: ModelDocument,
@@ -147,6 +153,8 @@ export class Sidebar {
   private renderProperties() {
     const sel = this.doc.selected();
     if (!sel.length) return this.renderEmpty();
+    const g = groupForSelection(this.doc.selection, this.doc.entities, this.doc.groups);
+    if (g && !(sel.length === 1 && this.doc.openGroupId === g.id)) return this.renderGroup(g, sel);
     if (sel.length === 1) return this.renderSingle(sel[0]);
     return this.renderMulti(sel);
   }
@@ -219,20 +227,19 @@ export class Sidebar {
     return opts.suffix ? h('span', { class: 'field-wrap' }, input, h('span', { class: 'suffix' }, opts.suffix)) : input;
   }
 
-  private lengthInput(mm: number, apply: (v: number) => void, min?: number): HTMLElement {
+  private lengthInput(mm: number, apply: (v: number) => boolean, min?: number): HTMLElement {
     return this.input(
       formatLength(mm, this.units, false),
       (text) => {
         const v = parseLength(text, this.units);
         if (v === null || (min !== undefined && v < min)) return false;
-        apply(v);
-        return true;
+        return apply(v);
       },
       { suffix: this.units, title: 'Type a value; units like mm, cm, in or 1/2" are fine' },
     );
   }
 
-  private vecInputs(values: Vec3, apply: (axis: number, v: number) => void, kind: 'length' | 'angle', min?: number): HTMLElement {
+  private vecInputs(values: Vec3, apply: (axis: number, v: number) => boolean, kind: 'length' | 'angle', min?: number): HTMLElement {
     const wrap = h('div', { class: 'vec3' });
     ['X', 'Y', 'Z'].forEach((axis, i) => {
       const field =
@@ -241,16 +248,16 @@ export class Sidebar {
           : this.input(trimNumber(values[i], 3), (t) => {
               const v = parseAngle(t);
               if (v === null) return false;
-              apply(i, v);
-              return true;
+              return apply(i, v);
             }, { suffix: '°' });
       wrap.append(h('span', { class: `axis-field axis-${axis.toLowerCase()}` }, h('span', { class: 'axis-tag' }, axis), field));
     });
     return wrap;
   }
 
-  private update(ids: string[], mutate: (e: Entity) => void) {
-    this.doc.transact(() => ids.forEach((id) => this.doc.update(id, mutate)));
+  /** Every edit goes through the Modeler API (ADR 0008). */
+  private call(name: string, input: unknown, label?: string): boolean {
+    return this.actions.call(name, input, label);
   }
 
   private typeToggle(entities: Entity[]): HTMLElement {
@@ -258,7 +265,7 @@ export class Sidebar {
     const allHole = entities.every((e) => e.hole);
     const allSolid = entities.every((e) => !e.hole);
     const btn = (label: string, active: boolean, hole: boolean, title: string) =>
-      h('button', { class: `seg ${active ? 'active' : ''}`, title, onclick: () => this.update(ids, (e) => (e.hole = hole)) }, label);
+      h('button', { class: `seg ${active ? 'active' : ''}`, title, onclick: () => this.call('set_hole', { target: { ids }, hole }, hole ? 'Make hole' : 'Make solid') }, label);
     return h('div', { class: 'segmented' },
       btn('Solid', allSolid, false, 'A normal solid part'),
       btn('Hole', allHole, true, 'Subtracted from every solid it overlaps (shown red, cut on export)'),
@@ -269,8 +276,7 @@ export class Sidebar {
     const ids = entities.map((e) => e.id);
     const current = entities[0].color;
     const set = (color: string) => {
-      this.update(ids, (e) => (e.color = color));
-      this.actions.setDefaultColor(color);
+      if (this.call('set_color', { target: { ids }, color }, 'Colour')) this.actions.setDefaultColor(color);
     };
     const swatches = h('div', { class: 'swatches' });
     for (const s of this.actions.workspace().swatches) {
@@ -295,8 +301,9 @@ export class Sidebar {
     return `${[size.x, size.y, size.z].map((v) => formatLength(v, this.units, false)).join(' × ')} ${this.units}`;
   }
 
-  private actionsRow(ids: string[]): HTMLElement {
+  private actionsRow(ids: string[], extra: HTMLElement[] = []): HTMLElement {
     return h('div', { class: 'prop-actions' },
+      ...extra,
       h('button', { class: 'btn', title: 'Drop so the lowest point sits on the ground (z = 0)', onclick: () => this.actions.placeOnGround(ids), html: `${icon('ground', 16)}<span>On ground</span>` }),
       h('button', { class: 'btn', title: 'Duplicate (⌘/Ctrl+D)', onclick: () => this.actions.duplicateSelection(), html: `${icon('duplicate', 16)}<span>Duplicate</span>` }),
       h('button', { class: 'btn danger', title: 'Delete (Del)', onclick: () => this.actions.deleteSelection(), html: `${icon('trash', 16)}<span>Delete</span>` }),
@@ -305,51 +312,98 @@ export class Sidebar {
 
   private renderSingle(e: Entity) {
     const id = e.id;
-    const set = (mutate: (x: any) => void) => this.update([id], mutate);
+    const set = (patch: Record<string, unknown>, label = 'Edit') => this.call('update_entity', { id, set: patch }, label);
 
     const name = this.input(e.name, (t) => {
       const v = t.trim();
-      if (!v) return false;
-      set((x) => (x.name = v));
-      return true;
+      return !!v && set({ name: v }, 'Rename');
     }, { cls: 'name-field' });
 
+    const group = e.groupId ? this.doc.getGroup(e.groupId) : undefined;
     const header = h('div', { class: 'prop-header' },
       h('span', { class: 'kind-icon', html: icon(KIND_ICON[e.kind], 18) }),
-      h('div', { class: 'prop-title' }, name, h('span', { class: 'muted small' }, KIND_NAME[e.kind])),
+      h('div', { class: 'prop-title' }, name, h('span', { class: 'muted small' }, KIND_NAME[e.kind], group ? ` · in “${group.name}”` : '')),
     );
 
     const size: HTMLElement[] = [];
     if (e.kind === 'box') {
-      size.push(this.row('Size', this.vecInputs(e.size, (i, v) => set((x) => (x.size[i] = v)), 'length', 0.01)));
+      size.push(this.row('Size', this.vecInputs(e.size, (i, v) => {
+        const next = [...e.size];
+        next[i] = v;
+        return set({ size: next }, 'Resize');
+      }, 'length', 0.01)));
     } else if (e.kind === 'cylinder') {
       size.push(
-        this.row('Diameter', this.lengthInput(e.radius * 2, (v) => set((x) => (x.radius = v / 2)), 0.01)),
-        this.row('Height', this.lengthInput(e.height, (v) => set((x) => (x.height = v)), 0.01)),
+        this.row('Diameter', this.lengthInput(e.radius * 2, (v) => set({ diameter: v }, 'Resize'), 0.01)),
+        this.row('Height', this.lengthInput(e.height, (v) => set({ height: v }, 'Resize'), 0.01)),
         this.row('Segments', this.input(String(e.segments), (t) => {
           const v = parseInt(t, 10);
-          if (!(v >= 3 && v <= 256)) return false;
-          set((x) => (x.segments = v));
-          return true;
+          return v >= 3 && v <= 256 && set({ segments: v });
         }), 'Smoothness of the round surface (3–256). 64 is plenty for printing.'),
       );
     } else {
       size.push(
-        this.row('Thickness', this.lengthInput(e.height, (v) => set((x) => (x.height = v)), 0.01)),
+        this.row('Thickness', this.lengthInput(e.height, (v) => set({ height: v }, 'Resize'), 0.01)),
         this.row('Outline', h('span', { class: 'muted' }, `${e.points.length} points`)),
       );
     }
 
     const sections: HTMLElement[] = [header, this.section('Type', this.typeToggle([e]))];
     if (!e.hole) sections.push(this.section('Colour', this.colorPicker([e])));
+    const vec3 = (values: number[], i: number, v: number) => {
+      const next = [...values];
+      next[i] = v;
+      return next;
+    };
     this.body.append(
       ...sections,
       this.section('Dimensions', ...size, this.row('Bounds', h('span', { class: 'muted' }, this.boundsText([e])))),
       this.section('Position',
-        this.row(e.kind === 'box' ? 'Corner' : 'Base', this.vecInputs(e.position, (i, v) => set((x) => (x.position[i] = v)), 'length')),
-        this.row('Rotation', this.vecInputs(e.rotation, (i, v) => set((x) => (x.rotation[i] = v)), 'angle')),
+        this.row(e.kind === 'box' ? 'Corner' : 'Base', this.vecInputs(e.position, (i, v) => set({ position: vec3(e.position, i, v) }, 'Move'), 'length')),
+        this.row('Rotation', this.vecInputs(e.rotation, (i, v) => set({ rotation: vec3(e.rotation, i, v) }, 'Rotate'), 'angle')),
       ),
-      this.actionsRow([id]),
+      this.actionsRow([id], [this.commandButton('edit.group', 'group', 'Group')]),
+    );
+  }
+
+  private commandButton(command: string, iconName: string, label: string, danger = false): HTMLElement {
+    const key = this.actions.keyLabel(command);
+    return h('button', {
+      class: `btn ${danger ? 'danger' : ''}`,
+      title: key ? `${label} (${key})` : label,
+      onclick: () => this.actions.runCommand(command),
+      html: `${icon(iconName, 16)}<span>${label}</span>`,
+    });
+  }
+
+  /** A whole group is selected: rename it, recolour/retype all members, move it, or open/ungroup it. */
+  private renderGroup(g: Group, members: Entity[]) {
+    const name = this.input(g.name, (t) => !!t.trim() && this.call('rename_group', { group: g.id, name: t.trim() }, 'Rename group'), { cls: 'name-field' });
+    const parent = g.parentId ? this.doc.getGroup(g.parentId) : undefined;
+    const box = worldBoundsOf(members);
+    const min = [box.min.x, box.min.y, box.min.z];
+    const sections: HTMLElement[] = [
+      h('div', { class: 'prop-header' },
+        h('span', { class: 'kind-icon', html: icon('group', 18) }),
+        h('div', { class: 'prop-title' }, name, h('span', { class: 'muted small' }, `Group · ${members.length} part${members.length === 1 ? '' : 's'}`, parent ? ` · in “${parent.name}”` : '')),
+      ),
+      this.section('Type', this.typeToggle(members)),
+    ];
+    if (!members.every((m) => m.hole)) sections.push(this.section('Colour', this.colorPicker(members)));
+    this.body.append(
+      ...sections,
+      this.section('Dimensions', this.row('Bounds', h('span', { class: 'muted' }, this.boundsText(members)))),
+      this.section('Position',
+        this.row('Corner', this.vecInputs(min as Vec3, (i, v) => {
+          const to = [...min];
+          to[i] = v;
+          return this.call('move', { target: { group: g.id }, to, anchor: 'min' }, 'Move group');
+        }, 'length'), 'Lowest corner of the group’s bounds'),
+      ),
+      this.actionsRow(members.map((m) => m.id), [
+        this.commandButton('edit.openGroup', 'openGroup', 'Open'),
+        this.commandButton('edit.ungroup', 'ungroup', 'Ungroup'),
+      ]),
     );
   }
 
@@ -360,46 +414,106 @@ export class Sidebar {
       this.section('Type', this.typeToggle(entities)),
       this.section('Colour', this.colorPicker(entities)),
       this.section('Bounds', h('div', { class: 'muted' }, this.boundsText(entities))),
-      this.actionsRow(ids),
+      this.actionsRow(ids, [this.commandButton('edit.group', 'group', 'Group')]),
     );
   }
 
   // ---- objects --------------------------------------------------------------
 
+  /** Objects tab: a tree of groups and parts, in model order. */
   private renderObjects() {
-    const list = h('ul', { class: 'outliner' });
     if (!this.doc.entities.length) {
       this.body.append(h('p', { class: 'muted empty' }, 'No objects yet.'));
       return;
     }
-    for (const e of this.doc.entities) {
-      const selected = this.doc.selection.has(e.id);
-      const eye = h('button', {
-        class: 'icon-btn eye',
-        title: e.visible ? 'Hide' : 'Show',
-        html: icon(e.visible ? 'eye' : 'eyeOff', 16),
-        onclick: (ev: MouseEvent) => {
-          ev.stopPropagation();
-          this.update([e.id], (x) => (x.visible = !x.visible));
+    const list = h('ul', { class: 'outliner' });
+    const doc = this.doc;
+    const childGroups = (parent: string | undefined) => doc.groups.filter((g) => g.parentId === parent);
+    const renderGroup = (g: Group, depth: number) => {
+      const members = groupMembers(g.id, doc.entities, doc.groups);
+      const selected = members.length > 0 && members.every((m) => doc.selection.has(m.id));
+      const collapsed = this.collapsed.has(g.id);
+      const anyVisible = members.some((m) => m.visible);
+      list.append(
+        h('li', {
+          class: `outliner-item group ${selected ? 'selected' : ''} ${doc.openGroupId === g.id ? 'open' : ''}`,
+          style: `padding-left:${6 + depth * 14}px`,
+          title: 'Click to select the group, double-click to open it',
+          onclick: (ev: MouseEvent) => {
+            const ids = members.map((m) => m.id);
+            if (ev.shiftKey || ev.metaKey || ev.ctrlKey) doc.toggleSelectionMany(ids);
+            else doc.setSelection(ids);
+          },
+          ondblclick: () => {
+            doc.setOpenGroup(g.id);
+            doc.clearSelection();
+          },
         },
-      });
-      const item = h('li', {
-        class: `outliner-item ${selected ? 'selected' : ''} ${e.visible ? '' : 'hidden'}`,
-        title: 'Click to select, Shift or ⌘/Ctrl-click to add, double-click to zoom',
-        onclick: (ev: MouseEvent) => {
-          if (ev.shiftKey || ev.metaKey || ev.ctrlKey) this.doc.toggleSelection(e.id);
-          else this.doc.setSelection([e.id]);
-        },
-        ondblclick: () => this.actions.zoomTo([e.id]),
-      },
-        h('span', { class: 'chip', style: `background:${e.hole ? 'transparent' : e.color}`, html: e.hole ? icon('hole', 14) : '' }),
-        h('span', { class: 'outliner-name' }, e.name),
-        h('span', { class: 'muted small' }, this.sizeSummary(e)),
-        eye,
+          h('button', {
+            class: 'icon-btn caret',
+            'aria-label': collapsed ? 'Expand' : 'Collapse',
+            onclick: (ev: MouseEvent) => {
+              ev.stopPropagation();
+              if (collapsed) this.collapsed.delete(g.id);
+              else this.collapsed.add(g.id);
+              this.render(true);
+            },
+          }, collapsed ? '▸' : '▾'),
+          h('span', { class: 'chip group-chip', html: icon('group', 14) }),
+          h('span', { class: 'outliner-name' }, g.name),
+          h('span', { class: 'muted small' }, `${members.length}`),
+          this.eye(anyVisible, () => this.call('set_visible', { target: { group: g.id }, visible: !anyVisible }, anyVisible ? 'Hide' : 'Show')),
+        ),
       );
-      list.append(item);
+      if (collapsed) return;
+      for (const sub of childGroups(g.id)) renderGroup(sub, depth + 1);
+      for (const e of doc.entities.filter((x) => x.groupId === g.id)) renderEntity(e, depth + 1);
+    };
+    const renderEntity = (e: Entity, depth: number) => {
+      list.append(
+        h('li', {
+          class: `outliner-item ${doc.selection.has(e.id) ? 'selected' : ''} ${e.visible ? '' : 'hidden'}`,
+          style: `padding-left:${6 + depth * 14 + (depth ? 20 : 0)}px`,
+          title: 'Click to select, ⌘/Ctrl-click to add, double-click to zoom',
+          onclick: (ev: MouseEvent) => {
+            if (ev.shiftKey || ev.metaKey || ev.ctrlKey) doc.toggleSelection(e.id);
+            else doc.setSelection([e.id]);
+          },
+          ondblclick: () => this.actions.zoomTo([e.id]),
+        },
+          h('span', { class: 'chip', style: `background:${e.hole ? 'transparent' : e.color}`, html: e.hole ? icon('hole', 14) : '' }),
+          h('span', { class: 'outliner-name' }, e.name),
+          h('span', { class: 'muted small' }, this.sizeSummary(e)),
+          this.eye(e.visible, () => this.call('set_visible', { target: { ids: [e.id] }, visible: !e.visible }, e.visible ? 'Hide' : 'Show')),
+        ),
+      );
+    };
+    // Top-level groups appear where their first part is in model order.
+    const shown = new Set<string>();
+    for (const e of doc.entities) {
+      if (!e.groupId) {
+        renderEntity(e, 0);
+        continue;
+      }
+      const top = groupChain(e.groupId, doc.groups).at(-1)!;
+      if (!shown.has(top.id)) {
+        shown.add(top.id);
+        renderGroup(top, 0);
+      }
     }
     this.body.append(list);
+  }
+
+  private eye(visible: boolean, toggle: () => void): HTMLElement {
+    return h('button', {
+      class: 'icon-btn eye',
+      title: visible ? 'Hide' : 'Show',
+      html: icon(visible ? 'eye' : 'eyeOff', 16),
+      onclick: (ev: MouseEvent) => {
+        ev.stopPropagation();
+        toggle();
+      },
+    });
   }
 
   private sizeSummary(e: Entity): string {

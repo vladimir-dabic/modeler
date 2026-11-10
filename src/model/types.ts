@@ -22,6 +22,8 @@ interface EntityBase {
   /** Hole entities are subtracted from every solid they overlap. */
   hole: boolean;
   visible: boolean;
+  /** Group this entity belongs to (see Group); absent = top level. */
+  groupId?: string;
 }
 
 /** Axis-aligned (in local space) box spanning [0, size] on each axis. */
@@ -47,6 +49,16 @@ export interface ExtrusionEntity extends EntityBase {
 
 export type Entity = BoxEntity | CylinderEntity | ExtrusionEntity;
 
+/**
+ * Groups are flat membership (ADR 0011): no transform of their own. Members keep
+ * world-space positions; nesting is expressed with parentId.
+ */
+export interface Group {
+  id: string;
+  name: string;
+  parentId?: string;
+}
+
 export type Unit = 'mm' | 'cm' | 'm' | 'in';
 
 export interface DocumentFile {
@@ -57,4 +69,5 @@ export interface DocumentFile {
   workspace?: WorkspaceId;
   printer?: PrinterSetting;
   entities: Entity[];
+  groups?: Group[];
 }

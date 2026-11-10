@@ -3,7 +3,8 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { buildWorldGeometries } from './csg';
 import { newId } from './Document';
-import type { DocumentFile, Entity, Unit, Vec2, Vec3 } from './types';
+import { pruneGroups } from './groups';
+import type { DocumentFile, Entity, Group, Unit, Vec2, Vec3 } from './types';
 import { DEFAULT_PRINTER_SETTING, isWorkspaceId, PRINTERS, type PrinterSetting, type WorkspaceId } from './workspaces';
 
 const UNITS: Unit[] = ['mm', 'cm', 'm', 'in'];
@@ -23,6 +24,7 @@ function parseEntity(raw: any): Entity | null {
     color: typeof raw.color === 'string' && /^#[0-9a-f]{6}$/i.test(raw.color) ? raw.color : '#cfd8e3',
     hole: raw.hole === true,
     visible: raw.visible !== false,
+    ...(typeof raw.groupId === 'string' && raw.groupId ? { groupId: raw.groupId } : {}),
   };
   switch (raw.kind) {
     case 'box':
@@ -54,6 +56,19 @@ export function parseDocumentFile(text: string): DocumentFile {
     seen.add(e.id);
     entities.push(e);
   }
+  // Groups: keep well-formed ones, drop dangling references, then prune empties.
+  const groups: Group[] = [];
+  const groupIds = new Set<string>();
+  for (const g of Array.isArray(raw.groups) ? raw.groups : []) {
+    if (!g || typeof g.id !== 'string' || !g.id || groupIds.has(g.id)) continue;
+    groupIds.add(g.id);
+    groups.push({
+      id: g.id,
+      name: typeof g.name === 'string' && g.name ? g.name : 'Group',
+      ...(typeof g.parentId === 'string' && g.parentId ? { parentId: g.parentId } : {}),
+    });
+  }
+  for (const e of entities) if (e.groupId && !groupIds.has(e.groupId)) delete e.groupId;
   return {
     format: 'modeler',
     version: 1,
@@ -61,6 +76,7 @@ export function parseDocumentFile(text: string): DocumentFile {
     workspace: isWorkspaceId(raw.workspace) ? raw.workspace : 'print',
     printer: parsePrinter(raw.printer),
     entities,
+    groups: pruneGroups(entities, groups),
   };
 }
 

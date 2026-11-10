@@ -9,7 +9,7 @@ A SketchUp-style 3D modeler in the browser for **3D-printed parts**, **woodworki
   - **Build:** metres, a person for scale, areas and volumes.
 - **Holes:** push a circle into a face to drill it. Holes stay editable and are cut in the STL.
 - **Comfortable navigation:** zoom at the cursor that never passes through surfaces, hold Shift to pan or Alt to orbit with any tool, and fully customisable shortcuts (`?`).
-- **Designed for AI:** every change will go through one typed Modeler API, used by the UI, an in-app assistant and an MCP server (planned).
+- **Designed for AI:** every change goes through one typed Modeler API, used by the UI, an MCP server (Claude Code / Claude Desktop can build in the open app: click **Connect AI**; see [mcp/README.md](mcp/README.md)) and, next, an in-app assistant.
 
 ## Quick start
 
@@ -22,6 +22,7 @@ npm run dev        # http://localhost:5173
 npm test           # unit tests
 npm run smoke      # end-to-end test in headless Chrome (dev server must be running)
 npm run build      # type-check + production build
+npm run build:mcp  # bundle the MCP server (mcp/dist/modeler-mcp.mjs)
 ```
 
 ## Documentation

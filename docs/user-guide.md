@@ -37,7 +37,7 @@ Default keys are shown; all of them can be changed (see [Shortcuts](#shortcuts))
 
 | Tool | Key | How |
 |---|---|---|
-| Select | `Space` | Click an object; ⌘/Ctrl-click adds or removes. Drag left→right to select objects fully inside the box, right→left to select anything it touches |
+| Select | `Space` | Click an object (a whole group selects as one; double-click opens it); ⌘/Ctrl-click adds or removes. Drag left→right to select objects fully inside the box, right→left to select anything it touches |
 | Box | `B` | Click a corner, click the opposite corner, move up and click for the height. Works on any face |
 | Cylinder | `C` | Click the centre, then the radius, then the height. Type `d8` for an 8 mm diameter |
 | Line / Shape | `L` | Click points to draw an outline; click the first point (or press Enter) to close it, then set the thickness. Backspace removes the last point |
@@ -56,6 +56,23 @@ Points snap, in this order of priority, to:
 3. the ground.
 
 Free points are rounded to the snap step (top bar, toggle with `G`). Arrow keys lock an axis or drawing plane: **→ red (X)**, **← green (Y)**, **↑/↓ blue (Z)**.
+
+### Groups
+
+- **Make a group:** select parts and press `⌘/Ctrl+G` (or right-click → *Group*). A group selects, moves, rotates and copies as one; copying a group makes a new group (`Drawer` → `Drawer 2`). Groups can contain groups.
+- **Select:** clicking any part of a group selects the whole group. Its properties show its name (editable), part count, bounds, and corner position (type to move the whole group).
+- **Edit inside:** double-click (or *Open group*) to edit inside. A badge at the top shows which group is open, and everything else fades back. Click outside the group, or press `Esc` (twice if something is selected), to close it.
+- **Ungroup:** `⇧⌘/Ctrl+Shift+G` dissolves a group; its parts stay where they are.
+- **Objects tab:** shows the groups as a tree. Click a group to select it, double-click to open it, ▸/▾ to fold it, and the eye to hide or show the whole group.
+
+### Right-click menu
+
+**Right-click** a part or group for:
+- Duplicate, Group, Ungroup, Open group;
+- Make hole / Make solid, Place on ground (Print: Place on plate);
+- Zoom to selection, Hide, Delete.
+
+**Right-click empty space** for Select all, Zoom extents, Show all hidden, Close group, and standard views. Each item shows its shortcut. A right-*drag* still pans; only a click opens the menu.
 
 ### Holes
 
@@ -97,6 +114,16 @@ Press `?` (or the keyboard button, top right) for the full list.
 
 Customisations are saved in the browser.
 
+## AI (Connect AI)
+
+Claude can build and edit your model through the **modeler MCP server** (setup: [mcp/README.md](../mcp/README.md)).
+
+1. Add the server to Claude Code or Claude Desktop (one-time).
+2. Click **Connect AI** in the top bar. The button pulses (*Waiting for AI…*) until the server is running, then turns green (*AI connected*).
+3. Ask Claude, e.g. *"build a bookcase with 4 shelves"* or *"add M3 screw holes in the corners of the selected part"*.
+
+Each AI change shows briefly at the bottom (*AI: Bookcase*) and is a normal undo step, so `⌘/Ctrl+Z` takes back exactly one AI action. Claude sees your selection and can render views of the model to check its work. Click the button again to disconnect. Only one tab can be connected; connecting another one takes over.
+
 ## Files
 
 - **Autosave:** the model is saved to the browser continuously and restored when you come back.
@@ -105,4 +132,4 @@ Customisations are saved in the browser.
 - **STL:** exports the selection, or everything, in mm with holes applied.
 - **Cut list CSV:** from the Cut list tab.
 
-Undo/redo: `⌘/Ctrl+Z` and `⇧⌘Z` / `Ctrl+Y`. Duplicate: `⌘/Ctrl+D`. Delete: `Del` / `Backspace`.
+Undo/redo: `⌘/Ctrl+Z` and `⇧⌘Z` / `Ctrl+Y`. Duplicate: `⌘/Ctrl+D` (a copy appears beside the original and is selected). Group / Ungroup: `⌘/Ctrl+G` / `⇧⌘/Ctrl+Shift+G`. Delete: `Del` / `Backspace`. Hide and *Show all hidden* are in the right-click menu (and bindable).

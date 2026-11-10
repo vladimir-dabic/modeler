@@ -1,10 +1,14 @@
-import type { DocumentFile, Entity, EntityKind, Unit } from './types';
+import { pruneGroups } from './groups';
+import type { DocumentFile, Entity, EntityKind, Group, Unit } from './types';
 import { DEFAULT_PRINTER_SETTING, type PrinterSetting, type WorkspaceId } from './workspaces';
 
 export interface ChangeEvent {
   /** True when this change closed a transaction (and was recorded for undo). */
   committed: boolean;
 }
+
+/** Which document setting changed (settings are saved with the file but not undoable). */
+export type SettingsChange = 'units' | 'workspace' | 'printer';
 
 type Listener<T> = (event: T) => void;
 
@@ -20,26 +24,36 @@ export function newId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
+interface UndoEntry {
+  snapshot: string;
+  label?: string;
+}
+
 /**
- * The model: a flat list of entities plus selection, with snapshot-based undo.
+ * The model: a flat list of entities and groups, plus selection, with snapshot undo.
  *
  * Edits happen inside a transaction: `begin()` remembers the state, any number of
  * mutations follow (each emits a non-committed change so the viewport updates live),
  * then `commit()` records one undo step or `cancel()` rolls everything back.
+ * See ADR 0002. Most callers should go through the Modeler API (src/api) instead.
  */
 export class ModelDocument {
   entities: Entity[] = [];
+  groups: Group[] = [];
   readonly selection = new Set<string>();
+  /** The group being edited ("opened"); clicks then pick parts inside it. UI state only. */
+  openGroupId: string | null = null;
   units: Unit = 'mm';
   /** Document settings (not part of undo history), saved with the file. */
   workspace: WorkspaceId = 'print';
   printer: PrinterSetting = structuredClone(DEFAULT_PRINTER_SETTING);
 
-  private undoStack: string[] = [];
-  private redoStack: string[] = [];
+  private undoStack: UndoEntry[] = [];
+  private redoStack: UndoEntry[] = [];
   private txSnapshot: string | null = null;
   private changeListeners = new Set<Listener<ChangeEvent>>();
   private selectionListeners = new Set<Listener<void>>();
+  private settingsListeners = new Set<Listener<SettingsChange>>();
   /** Bumped on every change; cheap cache key for derived data. */
   version = 0;
 
@@ -50,9 +64,15 @@ export class ModelDocument {
     return () => this.changeListeners.delete(fn);
   }
 
+  /** Selection or open-group context changed. */
   onSelectionChange(fn: Listener<void>): () => void {
     this.selectionListeners.add(fn);
     return () => this.selectionListeners.delete(fn);
+  }
+
+  onSettingsChange(fn: Listener<SettingsChange>): () => void {
+    this.settingsListeners.add(fn);
+    return () => this.settingsListeners.delete(fn);
   }
 
   private emitChange(committed: boolean) {
@@ -64,10 +84,18 @@ export class ModelDocument {
     for (const fn of this.selectionListeners) fn();
   }
 
+  private emitSettings(change: SettingsChange) {
+    for (const fn of this.settingsListeners) fn(change);
+  }
+
   // ---- queries ------------------------------------------------------------
 
   get(id: string): Entity | undefined {
     return this.entities.find((e) => e.id === id);
+  }
+
+  getGroup(id: string): Group | undefined {
+    return this.groups.find((g) => g.id === id);
   }
 
   selected(): Entity[] {
@@ -75,14 +103,37 @@ export class ModelDocument {
   }
 
   nextName(kind: EntityKind): string {
-    const base = KIND_LABEL[kind];
+    return this.nextNameFor(KIND_LABEL[kind]);
+  }
+
+  /** "Base 1", "Base 2", … across entity and group names. */
+  nextNameFor(base: string): string {
     let max = 0;
-    const re = new RegExp(`^${base} (\\d+)$`);
-    for (const e of this.entities) {
-      const m = re.exec(e.name);
+    const re = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} (\\d+)$`);
+    for (const n of [...this.entities.map((e) => e.name), ...this.groups.map((g) => g.name)]) {
+      const m = re.exec(n);
       if (m) max = Math.max(max, parseInt(m[1], 10));
     }
     return `${base} ${max + 1}`;
+  }
+
+  // ---- settings (saved, not undoable) -------------------------------------
+
+  setUnits(units: Unit) {
+    if (units === this.units) return;
+    this.units = units;
+    this.emitSettings('units');
+  }
+
+  setWorkspace(workspace: WorkspaceId) {
+    if (workspace === this.workspace) return;
+    this.workspace = workspace;
+    this.emitSettings('workspace');
+  }
+
+  setPrinter(printer: PrinterSetting) {
+    this.printer = structuredClone(printer);
+    this.emitSettings('printer');
   }
 
   // ---- transactions -------------------------------------------------------
@@ -95,12 +146,13 @@ export class ModelDocument {
     if (this.txSnapshot === null) this.txSnapshot = this.snapshot();
   }
 
-  commit(): void {
+  /** Close the transaction; `label` names the undo step (e.g. "AI: add 4 shelves"). */
+  commit(label?: string): void {
     if (this.txSnapshot === null) return;
     const before = this.txSnapshot;
     this.txSnapshot = null;
     if (this.snapshot() !== before) {
-      this.undoStack.push(before);
+      this.undoStack.push({ snapshot: before, label });
       if (this.undoStack.length > MAX_UNDO) this.undoStack.shift();
       this.redoStack = [];
     }
@@ -115,7 +167,7 @@ export class ModelDocument {
   }
 
   /** Run `fn` as a single undo step (joins an open transaction if there is one). */
-  transact(fn: () => void): void {
+  transact(fn: () => void, label?: string): void {
     const nested = this.inTransaction;
     this.begin();
     try {
@@ -124,7 +176,17 @@ export class ModelDocument {
       if (!nested) this.cancel();
       throw err;
     }
-    if (!nested) this.commit();
+    if (!nested) this.commit(label);
+  }
+
+  /** Opaque state token; `rollback(token)` restores it (used for atomic API batches). */
+  checkpoint(): string {
+    return this.snapshot();
+  }
+
+  rollback(token: string): void {
+    this.restore(token);
+    this.emitChange(false);
   }
 
   get canUndo(): boolean {
@@ -135,12 +197,17 @@ export class ModelDocument {
     return this.redoStack.length > 0;
   }
 
+  /** Label of the step `undo()` would revert, if it has one. */
+  get undoLabel(): string | undefined {
+    return this.undoStack[this.undoStack.length - 1]?.label;
+  }
+
   undo(): void {
     this.cancel();
     const prev = this.undoStack.pop();
     if (prev === undefined) return;
-    this.redoStack.push(this.snapshot());
-    this.restore(prev);
+    this.redoStack.push({ snapshot: this.snapshot(), label: prev.label });
+    this.restore(prev.snapshot);
     this.emitChange(true);
   }
 
@@ -148,23 +215,29 @@ export class ModelDocument {
     this.cancel();
     const next = this.redoStack.pop();
     if (next === undefined) return;
-    this.undoStack.push(this.snapshot());
-    this.restore(next);
+    this.undoStack.push({ snapshot: this.snapshot(), label: next.label });
+    this.restore(next.snapshot);
     this.emitChange(true);
   }
 
   private snapshot(): string {
-    return JSON.stringify(this.entities);
+    return JSON.stringify({ entities: this.entities, groups: this.groups });
   }
 
   private restore(snapshot: string) {
-    this.entities = JSON.parse(snapshot);
+    const state = JSON.parse(snapshot) as { entities: Entity[]; groups: Group[] };
+    this.entities = state.entities;
+    this.groups = state.groups;
     let selectionChanged = false;
     for (const id of [...this.selection]) {
       if (!this.get(id)) {
         this.selection.delete(id);
         selectionChanged = true;
       }
+    }
+    if (this.openGroupId && !this.getGroup(this.openGroupId)) {
+      this.openGroupId = null;
+      selectionChanged = true;
     }
     if (selectionChanged) this.emitSelection();
   }
@@ -176,15 +249,33 @@ export class ModelDocument {
     return entity;
   }
 
+  addGroup(group: Group): Group {
+    this.autoTx(() => this.groups.push(group));
+    return group;
+  }
+
+  /** Remove entities; groups left without members disappear too. */
   remove(ids: Iterable<string>): void {
     const set = new Set(ids);
     if (!set.size) return;
     this.autoTx(() => {
       this.entities = this.entities.filter((e) => !set.has(e.id));
+      this.groups = pruneGroups(this.entities, this.groups);
     });
     let selectionChanged = false;
     for (const id of set) selectionChanged = this.selection.delete(id) || selectionChanged;
+    if (this.openGroupId && !this.getGroup(this.openGroupId)) {
+      this.openGroupId = null;
+      selectionChanged = true;
+    }
     if (selectionChanged) this.emitSelection();
+  }
+
+  /** Replace the group list (group/ungroup operations); empty groups are pruned. */
+  setGroups(groups: Group[]): void {
+    this.autoTx(() => {
+      this.groups = pruneGroups(this.entities, groups);
+    });
   }
 
   /** Mutate an entity in place. */
@@ -210,7 +301,7 @@ export class ModelDocument {
     }
   }
 
-  // ---- selection ----------------------------------------------------------
+  // ---- selection & open group ---------------------------------------------
 
   setSelection(ids: Iterable<string>): void {
     const next = new Set(ids);
@@ -221,8 +312,16 @@ export class ModelDocument {
   }
 
   toggleSelection(id: string): void {
-    if (this.selection.has(id)) this.selection.delete(id);
-    else this.selection.add(id);
+    this.toggleSelectionMany([id]);
+  }
+
+  /** Toggle a whole unit (e.g. all members of a group) as one. */
+  toggleSelectionMany(ids: string[]): void {
+    const allSelected = ids.every((id) => this.selection.has(id));
+    for (const id of ids) {
+      if (allSelected) this.selection.delete(id);
+      else if (this.get(id)) this.selection.add(id);
+    }
     this.emitSelection();
   }
 
@@ -230,34 +329,46 @@ export class ModelDocument {
     this.setSelection([]);
   }
 
+  setOpenGroup(id: string | null): void {
+    if (id === this.openGroupId) return;
+    this.openGroupId = id && this.getGroup(id) ? id : null;
+    this.emitSelection();
+  }
+
   // ---- whole document -----------------------------------------------------
 
   toFile(): DocumentFile {
+    const state = JSON.parse(this.snapshot()) as { entities: Entity[]; groups: Group[] };
     return {
       format: 'modeler',
       version: 1,
       units: this.units,
       workspace: this.workspace,
       printer: structuredClone(this.printer),
-      entities: JSON.parse(this.snapshot()),
+      entities: state.entities,
+      groups: state.groups,
     };
   }
 
-  /** Replace contents. Undoable unless `resetHistory` is set (used when opening a file). */
-  load(file: DocumentFile, resetHistory: boolean): void {
+  /** Replace contents. Undoable (as `label`) unless `resetHistory` is set (used when opening a file). */
+  load(file: DocumentFile, resetHistory: boolean, label?: string): void {
     this.cancel();
     this.units = file.units;
     if (file.workspace) this.workspace = file.workspace;
     if (file.printer) this.printer = structuredClone(file.printer);
+    this.openGroupId = null;
+    const groups = file.groups ?? [];
     if (resetHistory) {
       this.undoStack = [];
       this.redoStack = [];
       this.entities = file.entities;
+      this.groups = groups;
       this.emitChange(true);
     } else {
       this.transact(() => {
         this.entities = file.entities;
-      });
+        this.groups = groups;
+      }, label);
     }
     this.clearSelection();
   }

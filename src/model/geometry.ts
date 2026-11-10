@@ -416,3 +416,48 @@ export function closestOnLineToRay(origin: THREE.Vector3, dir: THREE.Vector3, ra
   const e = dir.dot(w0);
   return (e - b * d) / denom;
 }
+
+// ---- whole-entity transforms (used by the Modeler API and tools) -------------
+
+/** Rotate an entity by quaternion `q` about world point `pivot` (mutates). */
+export function rotateEntityAbout(e: Entity, q: THREE.Quaternion, pivot: THREE.Vector3): void {
+  const p = new THREE.Vector3(...e.position).sub(pivot).applyQuaternion(q).add(pivot);
+  e.position = cleanVec(p);
+  e.rotation = rotationFromQuaternion(q.clone().multiply(entityQuaternion(e)));
+}
+
+/**
+ * Mirror an entity across the plane `axis = c` (mutates). A reflection flips handedness,
+ * so we re-express the result as a proper rotation plus one flipped local axis; boxes and
+ * cylinders are symmetric, extrusions get their outline mirrored.
+ *
+ * World point p = pos + R·l. Reflected: M·p = M·pos + (M·R·S)(S·l), with S flipping the
+ * local axis k that is most aligned with the mirror normal (keeps axis-aligned parts
+ * rotation-free).
+ */
+export function mirrorEntity(e: Entity, axis: 0 | 1 | 2, c: number): void {
+  const R = new THREE.Matrix4().makeRotationFromQuaternion(entityQuaternion(e));
+  const n = new THREE.Vector3().setComponent(axis, 1);
+  const local = n.clone().applyMatrix4(new THREE.Matrix4().copy(R).transpose());
+  const k = [Math.abs(local.x), Math.abs(local.y), Math.abs(local.z)].reduce((best, v, i, arr) => (v > arr[best] ? i : best), 0);
+  const M = new THREE.Matrix4().makeScale(axis === 0 ? -1 : 1, axis === 1 ? -1 : 1, axis === 2 ? -1 : 1);
+  const S = new THREE.Matrix4().makeScale(k === 0 ? -1 : 1, k === 1 ? -1 : 1, k === 2 ? -1 : 1);
+  const Rn = new THREE.Matrix4().multiplyMatrices(M, R).multiply(S);
+  const qn = new THREE.Quaternion().setFromRotationMatrix(Rn);
+
+  const pos = new THREE.Vector3(...e.position);
+  pos.setComponent(axis, 2 * c - pos.getComponent(axis));
+  const localAxis = new THREE.Vector3().setComponent(k, 1).applyQuaternion(qn);
+
+  if (e.kind === 'box') {
+    // Local coordinates along k now run negative; shift so the box spans [0, size] again.
+    pos.addScaledVector(localAxis, -e.size[k]);
+  } else if (e.kind === 'cylinder') {
+    if (k === 2) pos.addScaledVector(localAxis, -e.height);
+  } else {
+    if (k === 2) pos.addScaledVector(localAxis, -e.height);
+    else e.points = e.points.map(([x, y]) => (k === 0 ? [cleanNumber(-x), y] : [x, cleanNumber(-y)]));
+  }
+  e.position = cleanVec(pos);
+  e.rotation = rotationFromQuaternion(qn);
+}
