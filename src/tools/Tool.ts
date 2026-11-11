@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { ApiResult } from '../api/core';
 import type { ModelDocument } from '../model/Document';
 import { groundPlane, planeFromFace, planeFromNormal, type DrawPlane } from '../model/geometry';
 import { selectionUnit } from '../model/groups';
@@ -10,9 +11,12 @@ import { INFERENCE_LABEL, type Inference, type SnapSettings, type Snapper } from
 import type { Viewport } from '../viewport/Viewport';
 
 export type ToolId =
+  | 'text'
+  | 'dimension'
   | 'select'
   | 'box'
   | 'cylinder'
+  | 'sphere'
   | 'line'
   | 'pushpull'
   | 'move'
@@ -35,6 +39,8 @@ export interface ToolContext {
   setTool(id: ToolId): void;
   defaultColor(): string;
   workspace(): WorkspaceConfig;
+  /** Run a Modeler API operation as one undo step (errors are toasted). */
+  call(name: string, input: unknown, label?: string): ApiResult;
 }
 
 export interface ToolEvent {

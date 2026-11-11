@@ -53,6 +53,10 @@ const typeValue = async (text) => {
   await page.keyboard.press('Enter');
 };
 
+// The geometry engine (ADR 0017) loads in the background.
+const engine = await page.waitForFunction(() => window.modeler.geometryEngine() === 'manifold', null, { timeout: 5000 }).then(() => 'manifold', () => page.evaluate(() => window.modeler.geometryEngine()));
+check('Manifold geometry engine loads in the browser', engine === 'manifold', engine);
+
 // 0. Fresh start defaults to the Print workspace; the first part of this test is woodworking.
 check('defaults to the Print workspace', await page.evaluate(() => window.modeler.doc.workspace === 'print'));
 await page.click('.ws-btn:has-text("Workshop")');
@@ -451,6 +455,12 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   });
   const state = await tab.evaluate(() => ({ n: window.modeler.doc.entities.length, label: window.modeler.doc.undoLabel }));
   check('MCP batch appears in the tab as one AI undo step', built.ok && state.n === 2 && state.label === 'AI: Box with holes', JSON.stringify(state));
+  // The exploded view is look-only (ADR 0019): Claude's edit reassembles it first.
+  await call('explode_view', { factor: 0.8 });
+  const exploded = await tab.evaluate(() => window.modeler.viewport.explode.factor);
+  await call('add_box', { name: 'Lid', size: [60, 40, 3], position: [0, 0, 30] });
+  const afterEdit = await tab.evaluate(() => ({ factor: window.modeler.viewport.explode.factor, n: window.modeler.doc.entities.length }));
+  check('explode_view works over MCP; Claude\'s edit reassembles the view', exploded === 0.8 && afterEdit.factor === 0 && afterEdit.n === 3, JSON.stringify({ exploded, afterEdit }));
   const images = (await call('render_views', { views: ['iso'], size: 256 })).content.filter((c) => c.type === 'image');
   check('render_views over MCP returns an image', images.length === 1 && images[0].data.length > 1000);
   const stl = await call('export_stl', { path: 'body.stl' });
@@ -543,6 +553,340 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   });
   await tab.waitForTimeout(200);
   await tab.screenshot({ path: `${outDir}/modeler-dxf.png` });
+  await tab.close();
+}
+
+// 19. Annotations (ADR 0015): dimension and text tools, attached to parts; select, drag, edit, delete.
+{
+  const tab = await browser.newPage({ viewport: { width: 1300, height: 850 } });
+  tab.on('pageerror', (e) => errors.push(`annotation tab pageerror: ${e.message}`));
+  await tab.bringToFront(); // background pages get no animation frames, so labels wouldn't render
+  await tab.goto(URL);
+  await tab.waitForFunction(() => window.modeler);
+  await tab.evaluate(() => window.modeler.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true));
+  await tab.click('.ws-btn:has-text("Workshop")');
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.api.call('add_box', { name: 'Cabinet', size: [600, 300, 700] });
+    app.viewport.setView('front', false);
+    app.viewport.zoomExtents();
+  });
+  const at = (x, y, z, dx = 0, dy = 0) =>
+    tab.evaluate(([x, y, z, dx, dy]) => {
+      const app = window.modeler;
+      const r = app.viewport.canvas.getBoundingClientRect();
+      const s = app.viewport.toScreen(new (app.viewport.camera.position.constructor)(x, y, z));
+      return { x: r.left + s.x + dx, y: r.top + s.y + dy };
+    }, [x, y, z, dx, dy]);
+  const click = async (p) => {
+    await tab.mouse.move(p.x, p.y, { steps: 4 });
+    await tab.mouse.click(p.x, p.y);
+  };
+  // Dimension: top-left corner → top-right corner, then up 60 px.
+  await tab.keyboard.press('d');
+  await click(await at(0, 0, 700, 3, 2));
+  await click(await at(600, 0, 700, -3, 2));
+  await click(await at(300, 0, 700, 0, -60));
+  // Text: on the front face, label up and to the right.
+  await tab.keyboard.press('n');
+  await click(await at(300, 0, 350));
+  await click(await at(300, 0, 350, 160, -40));
+  await tab.waitForSelector('.vp-annotation-editor');
+  await tab.keyboard.type('Oak, 18 mm');
+  await tab.keyboard.press('Enter');
+  const anns = await tab.evaluate(() => JSON.parse(JSON.stringify(window.modeler.doc.annotations)));
+  const dim = anns.find((a) => a.kind === 'dimension');
+  const note = anns.find((a) => a.kind === 'note');
+  check('Dimension tool attaches to part corners', dim && dim.from.entity && dim.to.entity && dim.offset[2] > 0, JSON.stringify(dim));
+  check('Text tool adds a note on the part', note?.text === 'Oak, 18 mm' && note.anchor.entity && note.offset.some((v) => v !== 0), JSON.stringify(note));
+  // Labels reach the DOM on the next rendered frame.
+  const labels = async () => {
+    await tab.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    return tab.$$eval('.vp-annotation', (els) => els.map((e) => e.textContent));
+  };
+  check('labels show value and text', JSON.stringify(await labels()) === JSON.stringify(['600 mm', 'Oak, 18 mm']), JSON.stringify(await labels()));
+  // Resizing the part updates the dimension.
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.api.call('update_entity', { id: app.doc.entities[0].id, set: { size: [800, 300, 700] } });
+  });
+  await tab.waitForTimeout(50);
+  check('dimension follows a resize', (await labels())[0] === '800 mm', JSON.stringify(await labels()));
+
+  // Select tool: click the note label, drag it, Delete, undo.
+  await tab.keyboard.press('Space');
+  const box = await (await tab.$('.vp-note')).boundingBox();
+  await tab.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await tab.mouse.down();
+  await tab.mouse.move(box.x + box.width / 2 + 80, box.y + box.height / 2 + 30, { steps: 6 });
+  await tab.mouse.up();
+  const moved = await tab.evaluate(() => ({ sel: [...window.modeler.doc.annotationSelection], ann: window.modeler.doc.annotations.find((a) => a.kind === 'note'), label: window.modeler.doc.undoLabel }));
+  check('clicking a label selects it, dragging moves it', moved.sel.length === 1 && moved.label === 'Move annotation' && JSON.stringify(moved.ann.offset) !== JSON.stringify(note.offset), JSON.stringify(moved));
+  check('properties show the selected note', (await tab.textContent('.sidebar')).includes('Attached to'));
+  // Double-click edits in place.
+  await labels();
+  const box2 = await (await tab.$('.vp-note')).boundingBox();
+  await tab.mouse.dblclick(box2.x + box2.width / 2, box2.y + box2.height / 2);
+  await tab.waitForSelector('.vp-annotation-editor');
+  await tab.keyboard.press('Meta+a');
+  await tab.keyboard.type('Oak top');
+  await tab.keyboard.press('Enter');
+  check('double-click edits the text', (await labels()).includes('Oak top'), JSON.stringify(await labels()));
+  await tab.screenshot({ path: `${outDir}/modeler-annotations.png` });
+  await tab.keyboard.press('Delete');
+  const afterDelete = await tab.evaluate(() => window.modeler.doc.annotations.length);
+  await tab.keyboard.press('Meta+z');
+  const afterUndo = await tab.evaluate(() => window.modeler.doc.annotations.length);
+  check('Delete removes the annotation, undo restores it', afterDelete === 1 && afterUndo === 2, `${afterDelete} → ${afterUndo}`);
+  // Deleting the part takes its annotations along.
+  await tab.evaluate(() => window.modeler.api.call('delete_entities', { target: { all: true } }));
+  check('deleting the part removes its annotations', (await tab.evaluate(() => window.modeler.doc.annotations.length)) === 0);
+  await tab.close();
+}
+
+// 20. Project files (ADR 0016): save in place, Save As, Open, title + dirty dot; download fallback.
+{
+  const tab = await browser.newPage({ viewport: { width: 1300, height: 850 } });
+  tab.on('pageerror', (e) => errors.push(`files tab pageerror: ${e.message}`));
+  await tab.bringToFront();
+  await tab.goto(URL);
+  await tab.waitForFunction(() => window.modeler);
+  await tab.evaluate(() => {
+    window.modeler.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true);
+    // In-memory stand-ins for the native pickers (headless Chrome can't click them).
+    const disk = (window.__disk = {});
+    window.__pickers = { save: 0, open: 0 };
+    const handle = (name) => ({
+      kind: 'file',
+      name,
+      getFile: async () => new File([disk[name] ?? ''], name),
+      createWritable: async () => ({ write: async (t) => (disk[name] = t), close: async () => {} }),
+      queryPermission: async () => 'granted',
+    });
+    let saveNames = ['kitchen.modeler.json', 'kitchen-v2.modeler.json'];
+    window.showSaveFilePicker = async () => (window.__pickers.save++, handle(saveNames.shift()));
+    window.showOpenFilePicker = async () => (window.__pickers.open++, [handle('kitchen.modeler.json')]);
+  });
+  const state = () =>
+    tab.evaluate(() => ({ title: document.title, name: document.querySelector('.doc-name').textContent, dirty: document.querySelector('.doc-name').classList.contains('dirty'), pickers: { ...window.__pickers }, disk: Object.fromEntries(Object.entries(window.__disk).map(([k, v]) => [k, JSON.parse(v).entities.length])) }));
+  await tab.evaluate(() => window.modeler.api.call('add_box', { name: 'Base', size: [600, 560, 720] }));
+  let st = await state();
+  check('unsaved changes show a dot', st.dirty && st.title.startsWith('• Untitled'), JSON.stringify(st));
+  await tab.keyboard.press('Meta+s');
+  await tab.waitForTimeout(100);
+  st = await state();
+  check('first ⌘S asks for a file and saves', st.pickers.save === 1 && st.disk['kitchen.modeler.json'] === 1 && st.name === 'kitchen' && !st.dirty && st.title === 'kitchen — Modeler', JSON.stringify(st));
+  await tab.evaluate(() => window.modeler.api.call('add_box', { name: 'Wall', size: [600, 18, 720], position: [0, 600, 0] }));
+  await tab.keyboard.press('Meta+s');
+  await tab.waitForTimeout(100);
+  st = await state();
+  check('next ⌘S saves in place, no picker', st.pickers.save === 1 && st.disk['kitchen.modeler.json'] === 2 && !st.dirty, JSON.stringify(st));
+  await tab.keyboard.press('Meta+Shift+s');
+  await tab.waitForTimeout(100);
+  st = await state();
+  check('⇧⌘S saves as a new file', st.pickers.save === 2 && st.disk['kitchen-v2.modeler.json'] === 2 && st.name === 'kitchen-v2', JSON.stringify(st));
+  await tab.evaluate(() => window.modeler.runCommand('file.new'));
+  st = await state();
+  check('New model starts Untitled', st.name === 'Untitled' && !st.dirty, JSON.stringify(st));
+  await tab.keyboard.press('Meta+o');
+  await tab.waitForTimeout(150);
+  st = await state();
+  const opened = await tab.evaluate(() => ({ n: window.modeler.doc.entities.length, label: window.modeler.doc.undoLabel }));
+  check('⌘O opens a file as an undoable step', st.pickers.open === 1 && opened.n === 2 && opened.label === 'Open kitchen.modeler.json' && st.name === 'kitchen' && !st.dirty, JSON.stringify({ st, opened }));
+  await tab.screenshot({ path: `${outDir}/modeler-files.png`, clip: { x: 0, y: 0, width: 1300, height: 60 } });
+  // Without the File System Access API, Save downloads a copy.
+  await tab.evaluate(() => {
+    delete window.showSaveFilePicker;
+    delete window.showOpenFilePicker;
+  });
+  const [download] = await Promise.all([tab.waitForEvent('download', { timeout: 3000 }).catch(() => null), tab.keyboard.press('Meta+s')]);
+  check('other browsers: Save downloads a copy', download?.suggestedFilename() === 'kitchen.modeler.json', download?.suggestedFilename());
+  await tab.close();
+}
+
+// 21. Round and smooth parts: Sphere tool, cone from Properties, and each new kind rendered.
+{
+  const tab = await browser.newPage({ viewport: { width: 1300, height: 850 } });
+  tab.on('pageerror', (e) => errors.push(`shapes tab pageerror: ${e.message}`));
+  await tab.bringToFront();
+  await tab.goto(URL);
+  await tab.waitForFunction(() => window.modeler);
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true);
+    app.viewport.setView('iso', false);
+    const V = app.viewport.camera.position.constructor;
+    const box = app.viewport.referencesBox(); // empty box to extend
+    box.expandByPoint(new V(-60, -60, 0)).expandByPoint(new V(160, 120, 90));
+    app.viewport.fitBox(box);
+  });
+  const at = (x, y, z) =>
+    tab.evaluate(([x, y, z]) => {
+      const app = window.modeler;
+      const r = app.viewport.canvas.getBoundingClientRect();
+      const s = app.viewport.toScreen(new (app.viewport.camera.position.constructor)(x, y, z));
+      return { x: r.left + s.x, y: r.top + s.y };
+    }, [x, y, z]);
+  // Sphere tool: click on the ground, move, type a diameter.
+  await tab.click('button[aria-label="Sphere"]');
+  const p0 = await at(0, 0, 0);
+  await tab.mouse.move(p0.x + 3, p0.y, { steps: 3 });
+  await tab.mouse.click(p0.x + 3, p0.y);
+  await tab.mouse.move(p0.x + 40, p0.y + 10, { steps: 4 });
+  await tab.keyboard.type('d40');
+  await tab.keyboard.press('Enter');
+  const sphere = await tab.evaluate(() => {
+    const e = window.modeler.doc.entities[0];
+    return e && { kind: e.kind, radii: e.radii, z: e.position[2], label: window.modeler.doc.undoLabel, selected: window.modeler.doc.selection.has(e.id) };
+  });
+  check('Sphere tool: a typed diameter, resting on the ground', sphere?.kind === 'sphere' && sphere.radii.join() === '20,20,20' && sphere.z === 20 && sphere.label === 'Sphere' && sphere.selected, JSON.stringify(sphere));
+
+  // A cylinder becomes a cone from the Properties panel.
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.api.call('add_cylinder', { name: 'Spike', position: [60, 0, 0], diameter: 30, height: 60 });
+    app.doc.setSelection([app.doc.entities[1].id]);
+    app.sidebar.setTab('properties');
+  });
+  const top = tab.locator('.prop-row:has-text("Top ⌀") input');
+  await top.fill('0');
+  await top.press('Enter');
+  const cone = await tab.evaluate(() => window.modeler.doc.entities[1].radiusTop);
+  check('Properties: Top ⌀ 0 turns a cylinder into a cone', cone === 0, String(cone));
+
+  // One of each new kind, rendered.
+  const added = await tab.evaluate(() => {
+    const app = window.modeler;
+    return [
+      app.api.call('add_revolve', { name: 'Cup', position: [120, 0, 0], profile: [[0, 0], [20, 0], [24, 45], [21, 45], [17, 3], [0, 3]] }),
+      app.api.call('add_tube', { name: 'Handle', path: [[-40, 60, 0], [-20, 80, 40], [20, 90, 50], [60, 70, 20]], radii: [8, 6, 4, 2] }),
+      app.api.call('add_box', { name: 'Soft block', position: [100, 60, 0], size: [50, 40, 30], edge_radius: 6 }),
+      app.api.call('add_sphere', { name: 'Egg', position: [20, 60, 25], radii: [15, 15, 25] }),
+    ].every((r) => r.ok);
+  });
+  check('API adds a revolve, a tapered tube, a rounded box and an ellipsoid', added);
+  await tab.evaluate(() => window.modeler.doc.clearSelection());
+  await tab.waitForTimeout(250);
+  await tab.screenshot({ path: `${outDir}/modeler-shapes.png` });
+  await tab.close();
+}
+
+// 22. Split for printing from the right-click menu (pegs + clearance holes), on the Manifold engine.
+{
+  const tab = await browser.newPage({ viewport: { width: 1300, height: 850 } });
+  tab.on('pageerror', (e) => errors.push(`split tab pageerror: ${e.message}`));
+  await tab.bringToFront();
+  await tab.goto(URL);
+  await tab.waitForFunction(() => window.modeler && window.modeler.geometryEngine() === 'manifold');
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.doc.load({ format: 'modeler', version: 1, units: 'mm', workspace: 'print', entities: [] }, true);
+    app.api.call('add_cylinder', { name: 'Vase', position: [60, 60, 0], diameter: 70, diameter_top: 50, height: 120, segments: 96 });
+    app.api.call('add_cylinder', { name: 'Inside', position: [60, 60, 3], diameter: 40, diameter_top: 22, height: 125, segments: 96, hole: true });
+    app.doc.setSelection([app.doc.entities[0].id]);
+    app.viewport.setView('iso', false);
+    app.viewport.zoomExtents();
+  });
+  await tab.waitForTimeout(150);
+  const c = await tab.evaluate(() => {
+    const app = window.modeler;
+    const r = app.viewport.canvas.getBoundingClientRect();
+    const s = app.viewport.toScreen(new (app.viewport.camera.position.constructor)(60, 25, 60));
+    return { x: r.left + s.x, y: r.top + s.y };
+  });
+  await tab.mouse.click(c.x, c.y, { button: 'right' });
+  await tab.click('.cm-item:has-text("Split for printing")');
+  const split = await tab.evaluate(() => {
+    const d = window.modeler.doc;
+    return { groups: d.groups.filter((g) => !g.parentId).map((g) => g.name), pegs: d.entities.filter((e) => /^Peg \d/.test(e.name)).length, holes: d.entities.filter((e) => e.name.startsWith('Peg hole')).length, label: d.undoLabel, toast: document.querySelector('.toast').textContent };
+  });
+  check('right-click → Split for printing makes two pieces with pegs', split.groups.join() === 'Vase 1,Vase 2' && split.pegs === 2 && split.holes === 2 && split.label === 'Split for print', JSON.stringify(split));
+  await tab.evaluate(() => {
+    window.modeler.doc.clearSelection();
+    window.modeler.viewport.zoomExtents();
+  });
+  await tab.waitForTimeout(250);
+  await tab.screenshot({ path: `${outDir}/modeler-split.png` });
+  await tab.close();
+}
+
+// 23. Exploded view: a display state (button, slider, axis); the model and undo stay untouched.
+{
+  const tab = await browser.newPage({ viewport: { width: 1400, height: 850 } });
+  tab.on('pageerror', (e) => errors.push(`explode tab pageerror: ${e.message}`));
+  await tab.bringToFront();
+  await tab.goto(URL);
+  await tab.waitForFunction(() => window.modeler);
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true);
+    app.api.call('apply_operations', {
+      operations: [
+        { name: 'add_box', input: { name: 'Left side', size: [18, 300, 700] }, as: 'l' },
+        { name: 'add_box', input: { name: 'Right side', size: [18, 300, 700], position: [582, 0, 0] }, as: 'r' },
+        { name: 'add_box', input: { name: 'Top', size: [564, 300, 18], position: [18, 0, 682] }, as: 't' },
+        { name: 'add_box', input: { name: 'Bottom', size: [564, 300, 18], position: [18, 0, 0] }, as: 'b' },
+        { name: 'add_box', input: { name: 'Shelf', size: [564, 280, 18], position: [18, 0, 340] }, as: 's' },
+        { name: 'group', input: { target: { ids: ['$l', '$r', '$t', '$b', '$s'] }, name: 'Cabinet' } },
+        { name: 'add_box', input: { name: 'Lamp', size: [120, 120, 200], position: [240, 90, 760] } },
+      ],
+    });
+    app.viewport.setView('iso', false);
+    app.viewport.zoomExtents();
+  });
+  await tab.click('.ws-btn:has-text("Workshop")');
+  await tab.evaluate(() => window.modeler.viewport.zoomExtents());
+  const snapshot = () =>
+    tab.evaluate(() => {
+      const app = window.modeler;
+      const drawn = (n) => {
+        const e = app.doc.entities.find((x) => x.name === n);
+        const m = app.viewport.objects.get(e.id).group.matrixWorld.elements;
+        return [m[12], m[13], m[14]].map((v) => Math.round(v));
+      };
+      return {
+        lamp: drawn('Lamp'),
+        left: drawn('Left side'),
+        top: drawn('Top'),
+        model: app.doc.entities.find((x) => x.name === 'Lamp').position,
+        version: app.doc.version,
+        canUndo: app.doc.undoLabel,
+        factor: app.viewport.explode.factor,
+        gridShown: app.viewport.grid.mesh.parent.visible,
+        studio: app.viewport.scene.background !== null,
+        parts: app.doc.entities.length,
+      };
+    });
+  const before = await snapshot();
+  await tab.click('button:has-text("Explode")');
+  const on = await snapshot();
+  check('Explode lifts the lamp off; the cabinet stays on the floor (view only)', on.lamp[2] > before.lamp[2] + 100 && on.left[2] === before.left[2] && JSON.stringify(on.model) === JSON.stringify(before.model) && on.version === before.version, JSON.stringify({ before, on }));
+  check('exploded look: no grid/axes/bed, studio background', !on.gridShown && on.studio && before.gridShown && !before.studio, JSON.stringify({ before: [before.gridShown, before.studio], on: [on.gridShown, on.studio] }));
+  // Look only: Delete, ⌘Z and the Properties panel refuse to edit.
+  await tab.evaluate(() => window.modeler.doc.setSelection([window.modeler.doc.entities.find((e) => e.name === 'Lamp').id]));
+  await tab.keyboard.press('Delete');
+  await tab.keyboard.press('Meta+z');
+  const locked = await snapshot();
+  const sidebarText = await tab.textContent('.sidebar');
+  check('exploded view is look-only (Delete, undo, Properties)', locked.parts === before.parts && locked.version === before.version && sidebarText.includes('look only') && (await tab.isDisabled('button[aria-label="Undo"]')), JSON.stringify({ parts: locked.parts, version: locked.version }));
+  await tab.evaluate(() => window.modeler.doc.clearSelection());
+  check('the cabinet moves as one unit', on.left[2] - before.left[2] === on.top[2] - before.top[2], JSON.stringify({ before, on }));
+  await tab.locator('.explode-slider').fill('100');
+  const more = await snapshot();
+  check('the slider spreads it further', more.lamp[2] > on.lamp[2] && more.factor === 1, JSON.stringify(more));
+  // Open the cabinet: now its boards come apart.
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.doc.setOpenGroup(app.doc.groups[0].id);
+    app.viewport.zoomExtents();
+  });
+  const opened = await snapshot();
+  check('inside an open group, its parts come apart', opened.left[0] < before.left[0] - 100 && opened.top[2] > before.top[2] + 100 && opened.lamp[2] === before.lamp[2], JSON.stringify(opened));
+  await tab.screenshot({ path: `${outDir}/modeler-explode.png` });
+  await tab.evaluate(() => window.modeler.doc.setOpenGroup(null));
+  await tab.keyboard.press('b');
+  const back = await snapshot();
+  check('a drawing tool puts it back together, grid and all', back.factor === 0 && JSON.stringify(back.lamp) === JSON.stringify(before.lamp) && back.version === before.version && back.gridShown && !back.studio, JSON.stringify(back));
   await tab.close();
 }
 

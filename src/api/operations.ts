@@ -3,13 +3,17 @@ import { z } from 'zod';
 import { buildCutList } from '../model/cutlist';
 import { copyEntities } from '../model/editing';
 import { newId } from '../model/Document';
+import { anchorFor, AXIS_VECTORS, dimensionGeometry, MAX_ANNOTATION_TEXT } from '../model/annotations';
 import { DxfError, parseDxf } from '../model/dxf';
 import { exportStl, parseDocumentFile } from '../model/io';
 import { DRAWING_UNITS, DRAWING_UNIT_MM, localBounds, referenceMatrix } from '../model/references';
-import { cleanNumber, cleanVec, DEG, mirrorEntity, rotateEntityAbout } from '../model/geometry';
+import { cleanNumber, cleanVec, DEG, mirrorEntity, rotateEntityAbout, worldBounds } from '../model/geometry';
 import { commonParentGroup, groupChain, groupMembers } from '../model/groups';
-import { footprintMm2, solidVolumes } from '../model/quantities';
-import type { BoxEntity, CylinderEntity, DrawingGeometry, DrawingUnit, Entity, ExtrusionEntity, Group, ReferenceDrawing, Vec3 as V3 } from '../model/types';
+import { footprintMm2, fusedVolume, solidVolumes } from '../model/quantities';
+import { maxEdgeRadius } from '../model/shapes';
+import { buildWorldGeometries, cuttersFor } from '../model/csg';
+import { manifoldReady, sectionAt } from '../model/manifold';
+import type { Anchor, Annotation, BoxEntity, CylinderEntity, DrawingGeometry, DrawingUnit, Entity, ExtrusionEntity, Group, ReferenceDrawing, RevolveEntity, SphereEntity, TubeEntity, Vec3 as V3 } from '../model/types';
 import {
   checkPrintFit,
   FILAMENTS,
@@ -20,8 +24,8 @@ import {
   WORKSPACE_IDS,
   WORKSPACES,
 } from '../model/workspaces';
-import { ApiError, boundsJson, boundsOf, entityLine, entitySummary, groupLine, OperationContext, r2, referenceLine, type FileHost, type ViewName } from './core';
-import { Axis, Color, Id, Num, Pattern, Positive, Rotation, Size3, Target, Vec2, Vec3, type PatternInput } from './schemas';
+import { annotationLine, ApiError, boundsJson, boundsOf, entityLine, entitySummary, groupLine, OperationContext, r2, referenceLine, type FileHost, type ViewName } from './core';
+import { Axis, Color, Id, NonNegative, Num, Pattern, Positive, Rotation, Size3, Target, Vec2, Vec3, type PatternInput } from './schemas';
 
 /**
  * Every Modeler API operation. See docs/modeler-api.md.
@@ -102,7 +106,7 @@ const getScene = def({
   name: 'get_scene',
   kind: 'read',
   description:
-    'Overview of the model: workspace, printer, overall bounds, the parts and any reference drawings (imported plans to build on; not parts). detail "outline" lists each top-level group as one line (best first call on big models), "compact" (default) one line per part, "full" complete JSON. Lines read: id "name" shape size at x,y,z [hole] in "group".',
+    'Overview of the model: workspace, printer, overall bounds, the parts, annotations (notes, dimensions) and any reference drawings (imported plans to build on; not parts). detail "outline" lists each top-level group as one line (best first call on big models), "compact" (default) one line per part, "full" complete JSON. Lines read: id "name" shape size at x,y,z [hole] in "group".',
   input: z.strictObject({
     detail: z.enum(['outline', 'compact', 'full']).optional(),
     include_hidden: z.boolean().optional(),
@@ -121,6 +125,7 @@ const getScene = def({
     };
     if (ws.printPlate) scene.printer = { name: printerName(doc.printer), volume: printerVolume(doc.printer) };
     if (doc.references.length) scene.references = doc.references.map((r) => referenceLine(r, doc));
+    if (doc.annotations.length) scene.annotations = doc.annotations.map((a) => annotationLine(a, doc));
     if (detail === 'full') {
       scene.parts = parts.map((e) => entitySummary(e, doc.groups));
       scene.groups = doc.groups.map((g) => ({ id: g.id, name: g.name, parent: g.parentId, parts: groupMembers(g.id, doc.entities, doc.groups).length }));
@@ -193,8 +198,8 @@ const checkPrint = def({
     const { doc } = ctx;
     const volume = printerVolume(doc.printer);
     const solids = doc.entities.filter((e) => e.visible && !e.hole);
-    const vols = solidVolumes(solids, doc.entities);
-    const total = [...vols.values()].reduce((a, b) => a + b, 0) / 1000;
+    // Overlapping parts count once: this is the plastic the printer lays down.
+    const total = fusedVolume(solids, doc.entities, doc.groups) / 1000;
     return {
       printer: printerName(doc.printer),
       build_volume: volume,
@@ -223,9 +228,10 @@ const getQuantities = def({
   input: z.strictObject({}),
   run(ctx) {
     const solids = ctx.doc.entities.filter((e) => e.visible && !e.hole);
-    const vols = solidVolumes(solids, ctx.doc.entities);
+    const vols = solidVolumes(solids, ctx.doc.entities, ctx.doc.groups);
     const rows = solids.map((e) => ({ id: e.id, name: e.name, footprint_m2: r2(footprintMm2(e) / 1e6), volume_m3: Math.round((vols.get(e.id) ?? 0) / 1e6) / 1000 }));
-    return { rows, total_volume_m3: Math.round([...vols.values()].reduce((a, b) => a + b, 0) / 1e6) / 1000 };
+    // The total fuses overlapping parts (a wall through a slab counts once); rows are per part.
+    return { rows, total_volume_m3: Math.round(fusedVolume(solids, ctx.doc.entities, ctx.doc.groups) / 1e6) / 1000 };
   },
 });
 
@@ -234,10 +240,16 @@ const getQuantities = def({
 const addBox = def({
   name: 'add_box',
   kind: 'write',
-  description: 'Add a box (board, block, panel). position is its min corner (default origin); size is [x, y, z] in mm. Example: { "name": "Side", "position": [0, 0, 18], "size": [18, 300, 700] }.',
-  input: z.strictObject({ ...AddCommon, size: Size3 }),
+  description:
+    'Add a box (board, block, panel). position is its min corner (default origin); size is [x, y, z] in mm. edge_radius rounds every edge and corner (printed enclosures, soft blocks). Example: { "name": "Side", "position": [0, 0, 18], "size": [18, 300, 700] }.',
+  input: z.strictObject({ ...AddCommon, size: Size3, edge_radius: NonNegative.optional().describe('Round all edges, mm (< half the smallest side)') }),
   run(ctx, input) {
-    const e: BoxEntity = { ...baseEntity(ctx, 'box', input), kind: 'box', size: input.size.map(cleanNumber) as V3 };
+    const e: BoxEntity = {
+      ...baseEntity(ctx, 'box', input),
+      kind: 'box',
+      size: input.size.map(cleanNumber) as V3,
+      ...(input.edge_radius ? { edgeRadius: edgeRadiusFor(input.size, input.edge_radius) } : {}),
+    };
     ctx.doc.add(e);
     return { ids: [e.id] };
   },
@@ -247,17 +259,20 @@ const addCylinder = def({
   name: 'add_cylinder',
   kind: 'write',
   description:
-    'Add a cylinder (rod, dowel, round hole). position is the centre of its base; it extends along axis (default z) by height. Give radius or diameter. For a screw hole: hole: true. Example M3 hole through a 10 mm plate: { "position": [20, 20, -1], "diameter": 3.4, "height": 12, "hole": true }.',
+    'Add a cylinder (rod, dowel, round hole), or a cone/frustum with a different top: radius_top or diameter_top (0 = pointed; larger than the base for a countersink hole). position is the centre of its base; it extends along axis (default z) by height. Give radius or diameter. For a screw hole: hole: true. Example M3 hole through a 10 mm plate: { "position": [20, 20, -1], "diameter": 3.4, "height": 12, "hole": true }.',
   input: z
     .strictObject({
       ...AddCommon,
       radius: Positive.optional(),
       diameter: Positive.optional(),
       height: Positive,
+      radius_top: NonNegative.optional(),
+      diameter_top: NonNegative.optional(),
       axis: Axis.optional(),
       segments: z.int().min(3).max(256).optional().describe('Smoothness; default from workspace'),
     })
-    .refine((v) => (v.radius ? 1 : 0) + (v.diameter ? 1 : 0) === 1, 'give exactly one of radius or diameter'),
+    .refine((v) => (v.radius ? 1 : 0) + (v.diameter ? 1 : 0) === 1, 'give exactly one of radius or diameter')
+    .refine((v) => v.radius_top === undefined || v.diameter_top === undefined, 'give radius_top or diameter_top, not both'),
   run(ctx, input) {
     const axisRotation: Record<string, V3> = { x: [0, 90, 0], y: [-90, 0, 0], z: [0, 0, 0] };
     const base = baseEntity(ctx, 'cylinder', input);
@@ -269,6 +284,7 @@ const addCylinder = def({
       height: cleanNumber(input.height),
       segments: input.segments ?? workspace(ctx).cylinderSegments,
     };
+    setTopRadius(e, input.radius_top ?? (input.diameter_top !== undefined ? input.diameter_top / 2 : undefined));
     ctx.doc.add(e);
     return { ids: [e.id] };
   },
@@ -291,12 +307,262 @@ const addShape = def({
   },
 });
 
+// ---- round and smooth kinds -------------------------------------------------------------------
+
+const AXIS_ROTATION: Record<string, V3> = { x: [0, 90, 0], y: [-90, 0, 0], z: [0, 0, 0] };
+
+function edgeRadiusFor(size: number[], r: number): number {
+  const max = maxEdgeRadius(size);
+  if (r > max) throw new ApiError('invalid_input', `edge_radius ${r} is too large for a ${size.join('×')} box`, `At most ${r2(max)} (just under half the smallest side).`, 'edge_radius');
+  return cleanNumber(r);
+}
+
+/** A top radius makes a cone/frustum; equal to the base, it is a plain cylinder again. */
+function setTopRadius(e: CylinderEntity, top: number | undefined) {
+  if (top === undefined) return;
+  if (Math.abs(top - e.radius) < 1e-9) delete e.radiusTop;
+  else e.radiusTop = cleanNumber(top);
+}
+
+const addSphere = def({
+  name: 'add_sphere',
+  kind: 'write',
+  description:
+    'Add a sphere or ellipsoid. position is its CENTRE. Give radius or diameter (sphere), or radii [x, y, z] (ellipsoid: egg, head, body). Use with holes for domes and half-spheres.',
+  input: z
+    .strictObject({
+      ...AddCommon,
+      radius: Positive.optional(),
+      diameter: Positive.optional(),
+      radii: Size3.optional().describe('Ellipsoid radii [x, y, z], mm'),
+      segments: z.int().min(8).max(256).optional().describe('Smoothness (default 48)'),
+    })
+    .refine((v) => (v.radius ? 1 : 0) + (v.diameter ? 1 : 0) + (v.radii ? 1 : 0) === 1, 'give exactly one of radius, diameter or radii'),
+  run(ctx, input) {
+    const r = input.radius ?? (input.diameter ? input.diameter / 2 : undefined);
+    const e: SphereEntity = {
+      ...baseEntity(ctx, 'sphere', input),
+      kind: 'sphere',
+      radii: (r !== undefined ? [r, r, r] : input.radii!).map(cleanNumber) as V3,
+      segments: input.segments ?? 48,
+    };
+    ctx.doc.add(e);
+    return { ids: [e.id] };
+  },
+});
+
+const addRevolve = def({
+  name: 'add_revolve',
+  kind: 'write',
+  description:
+    'Add a solid of revolution (vase, bottle, knob, turned leg, bowl): profile points [radius, z] (radius ≥ 0) outline one side of it; it spins 360° around an axis through position (default z). Points with radius 0 lie on the axis and close it there. Example cup: [[0,0],[40,0],[45,90],[42,90],[37,4],[0,4]].',
+  input: z.strictObject({
+    ...AddCommon,
+    profile: z.array(Vec2).min(3).max(500).describe('[radius, z] points of a closed outline, mm'),
+    axis: Axis.optional(),
+    segments: z.int().min(3).max(256).optional().describe('Smoothness around the axis (default 64)'),
+  }),
+  run(ctx, input) {
+    const base = baseEntity(ctx, 'revolve', input);
+    if (!input.rotation) base.rotation = AXIS_ROTATION[input.axis ?? 'z'];
+    const e: RevolveEntity = {
+      ...base,
+      kind: 'revolve',
+      profile: input.profile.map(([r, z]) => [cleanNumber(r), cleanNumber(z)]),
+      segments: input.segments ?? 64,
+    };
+    ctx.doc.add(e);
+    return { ids: [e.id] };
+  },
+});
+
+/** World path points → position (the first point) and local points. */
+function tubePath(points: number[][]): { position: V3; path: V3[] } {
+  const [x0, y0, z0] = points[0];
+  return { position: [cleanNumber(x0), cleanNumber(y0), cleanNumber(z0)], path: points.map(([x, y, z]) => [cleanNumber(x - x0), cleanNumber(y - y0), cleanNumber(z - z0)]) };
+}
+
+const addTube = def({
+  name: 'add_tube',
+  kind: 'write',
+  description:
+    'Add a round tube along a path of world points (tail, neck, handle, cable, pipe, rail): one part instead of many cylinders. smooth (default true) curves through the points; false makes straight segments. Give radius/diameter for a constant tube, or radii (one per point) to taper. Ends are flat.',
+  input: z
+    .strictObject({
+      name: AddCommon.name,
+      color: AddCommon.color,
+      hole: AddCommon.hole,
+      group: AddCommon.group,
+      path: z.array(Vec3).min(2).max(500).describe('World points the centre line passes through, mm'),
+      radius: Positive.optional(),
+      diameter: Positive.optional(),
+      radii: z.array(Positive).min(2).max(500).optional().describe('A radius per path point'),
+      smooth: z.boolean().optional(),
+      segments: z.int().min(3).max(128).optional().describe('Smoothness around the tube (default 24)'),
+    })
+    .refine((v) => (v.radius ? 1 : 0) + (v.diameter ? 1 : 0) + (v.radii ? 1 : 0) === 1, 'give exactly one of radius, diameter or radii'),
+  run(ctx, input) {
+    if (input.radii && input.radii.length !== input.path.length) {
+      throw new ApiError('invalid_input', `radii has ${input.radii.length} values for ${input.path.length} path points`, 'Give one radius per point.', 'radii');
+    }
+    const { position, path } = tubePath(input.path);
+    const radius = input.radius ?? (input.diameter ? input.diameter / 2 : Math.max(...input.radii!));
+    const e: TubeEntity = {
+      ...baseEntity(ctx, 'tube', { ...input, position }),
+      kind: 'tube',
+      path,
+      radius: cleanNumber(radius),
+      ...(input.radii ? { radii: input.radii.map(cleanNumber) } : {}),
+      smooth: input.smooth ?? true,
+      segments: input.segments ?? 24,
+    };
+    ctx.doc.add(e);
+    return { ids: [e.id] };
+  },
+});
+
+// ---- split for printing ---------------------------------------------------------------------
+
+const splitForPrint = def({
+  name: 'split_for_print',
+  kind: 'write',
+  description:
+    'Cut a part or assembly into two printable pieces along a plane across axis (default z) at a coordinate (default: the middle). The lower piece gets pegs and the upper one matching holes with clearance, so they align and glue. Each piece is a new group; holes that cut the original are copied into each piece; the upper piece moves gap mm away. The original is replaced (one undo brings it back). Default pegs: as many as fit, up to 2.',
+  input: z.strictObject({
+    target: Target,
+    axis: Axis.optional(),
+    at: Num.optional().describe('Where to cut, mm along axis'),
+    gap: NonNegative.optional().describe('How far to move the upper piece apart (default 10)'),
+    pegs: z.int().min(0).max(8).optional().describe('Number of pegs (0 = none)'),
+    peg_diameter: Positive.optional().describe('Default: 5 mm, smaller for small cut faces'),
+    peg_depth: Positive.optional().describe('How far a peg goes into each piece (default 1.2 × diameter)'),
+    clearance: NonNegative.optional().describe('Extra radius of the peg holes (default 0.2 mm, a sliding fit)'),
+    name: z.string().min(1).max(80).optional().describe('Base name of the pieces'),
+  }),
+  run(ctx, input) {
+    const { doc } = ctx;
+    const targets = ctx.resolve(input.target);
+    const solids = targets.filter((e) => !e.hole && e.visible);
+    if (!solids.length) throw new ApiError('not_found', 'The target has no visible solid parts to split');
+    const axis = input.axis ?? 'z';
+    const i = AXIS_INDEX[axis];
+    const box = boundsOf(solids);
+    const lo = box.min.getComponent(i);
+    const hi = box.max.getComponent(i);
+    const at = cleanNumber(input.at ?? (lo + hi) / 2);
+    if (!(at > lo + 0.5 && at < hi - 0.5)) {
+      throw new ApiError('invalid_input', `at ${at} is not inside the target (${axis} ${r2(lo)} … ${r2(hi)})`, 'Cut somewhere between them, at least 0.5 mm from either end.', 'at');
+    }
+    // Holes that cut the original are copied into both pieces.
+    const allHoles = doc.entities.filter((e) => e.hole && e.visible);
+    const affecting = [...new Set(solids.flatMap((s) => cuttersFor(s, allHoles, doc.groups)))];
+
+    // Pegs: placed inside the cut face, clear of its edges.
+    const clearance = input.clearance ?? 0.2;
+    const warnings: string[] = [];
+    let pegPoints: THREE.Vector3[] = [];
+    let diameter = input.peg_diameter ?? 5;
+    const wanted = input.pegs ?? 2;
+    if (wanted > 0) {
+      if (manifoldReady()) {
+        const geoms = buildWorldGeometries(solids, doc.entities, doc.groups).map((p) => p.geometry);
+        const probe = sectionAt(geoms, axis, at, 0, 0);
+        if (input.peg_diameter === undefined) diameter = Math.min(5, Math.max(2, Math.min(...probe.size) * 0.25));
+        const wall = 1.2;
+        // Thin walls: try smaller pegs (down to 2 mm) before giving up, unless a size was asked for.
+        const sizes = input.peg_diameter === undefined ? [...new Set([diameter, 4, 3, 2].filter((d) => d <= diameter))] : [diameter];
+        for (const d of sizes) {
+          const points = sectionAt(geoms, axis, at, d / 2 + clearance + wall, wanted).points;
+          if (points.length > pegPoints.length) {
+            pegPoints = points;
+            diameter = d;
+          }
+          if (points.length >= wanted) break;
+        }
+        geoms.forEach((g) => g.dispose());
+        if (pegPoints.length < wanted) warnings.push(pegPoints.length ? `Only ${pegPoints.length} of ${wanted} pegs fit in the cut face.` : 'The cut face is too small for pegs; glue the pieces flat.');
+      } else {
+        pegPoints = [box.getCenter(new THREE.Vector3()).setComponent(i, at)];
+        warnings.push('The geometry engine is not loaded: one peg was placed at the centre; check it is inside the part.');
+      }
+    }
+    // A peg may go no deeper than either piece is thick.
+    let depth = input.peg_depth ?? diameter * 1.2;
+    const room = Math.min(at - lo, hi - at) - clearance - 0.8;
+    if (pegPoints.length && depth > room) {
+      depth = Math.max(1, room);
+      warnings.push(`Pegs shortened to ${r2(depth)} mm deep to fit the pieces.`);
+    }
+
+    const baseName = input.name ?? ('group' in input.target ? ctx.group(input.target.group).name : solids.length === 1 ? solids[0].name : 'Part');
+    const pieces = [
+      { name: `${baseName} 1`, keepLow: true },
+      { name: `${baseName} 2`, keepLow: false },
+    ];
+    // Snug: the cutter only has to cover this piece's own geometry.
+    const margin = 1;
+    const created: Entity[] = [];
+    const newGroups: Group[] = [];
+    for (const piece of pieces) {
+      const groupId = newId();
+      const cutId = newId();
+      newGroups.push({ id: groupId, name: piece.name }, { id: cutId, name: `${piece.name} body`, parentId: groupId });
+      const members: Entity[] = [];
+      for (const e of [...solids, ...affecting]) {
+        const c = structuredClone(e);
+        c.id = newId();
+        c.groupId = cutId;
+        if (c.hole) c.holeScope = 'group';
+        members.push(c);
+      }
+      // Removes the other half: a box hole that only cuts this piece's body.
+      const size = box.getSize(new THREE.Vector3()).addScalar(2 * margin);
+      const min = box.min.clone().subScalar(margin);
+      if (piece.keepLow) {
+        min.setComponent(i, at);
+        size.setComponent(i, hi + margin - at);
+      } else {
+        size.setComponent(i, at - (lo - margin));
+      }
+      members.push({ ...baseEntity(ctx, 'box', { name: `Cut ${piece.keepLow ? 'above' : 'below'} ${axis} ${at}`, position: min.toArray() as V3, hole: true }), kind: 'box', size: cleanVec(size), holeScope: 'group', quiet: true, groupId: cutId } as BoxEntity);
+      pegPoints.forEach((p, k) => {
+        const base = p.clone().setComponent(i, piece.keepLow ? at - depth : at - 0.5);
+        const radius = piece.keepLow ? diameter / 2 : diameter / 2 + clearance;
+        const height = piece.keepLow ? 2 * depth : depth + clearance + 0.5;
+        members.push({
+          ...baseEntity(ctx, 'cylinder', { name: piece.keepLow ? `Peg ${k + 1}` : `Peg hole ${k + 1}`, position: base.toArray() as V3, rotation: AXIS_ROTATION[axis], color: solids[0].color, hole: !piece.keepLow }),
+          kind: 'cylinder',
+          radius: cleanNumber(radius),
+          height: cleanNumber(height),
+          segments: 48,
+          // The peg sits beside the body (not inside it), so the body's cut box can't remove it.
+          groupId: piece.keepLow ? groupId : cutId,
+          ...(piece.keepLow ? {} : { holeScope: 'group' as const }),
+        } as CylinderEntity);
+      });
+      if (!piece.keepLow) for (const m of members) m.position = cleanVec(vec(m.position).setComponent(i, m.position[i] + (input.gap ?? 10)));
+      created.push(...members);
+    }
+    doc.remove(targets.map((e) => e.id));
+    for (const e of created) doc.add(e);
+    doc.setGroups([...doc.groups, ...newGroups]);
+    return {
+      ids: created.map((e) => e.id),
+      pieces: pieces.map((p) => p.name),
+      pegs: pegPoints.length,
+      ...(pegPoints.length ? { peg: { diameter: r2(diameter), depth: r2(depth), hole_diameter: r2(diameter + 2 * clearance) } } : {}),
+      ...(warnings.length ? { notes: warnings } : {}),
+    };
+  },
+});
+
 // ---- edit -----------------------------------------------------------------------------------
 
 const updateEntity = def({
   name: 'update_entity',
   kind: 'write',
-  description: 'Change one part\'s parameters. Only keys that fit the part apply: size (box); radius or diameter, segments (cylinder); points (shape); height (cylinder, shape). Example: { "id": "k3f9a2", "set": { "size": [18, 300, 650] } }.',
+  description:
+    'Change one part\'s parameters. Only keys that fit the part apply: size, edge_radius (box); radius or diameter (cylinder, sphere, tube); radius_top or diameter_top (cylinder → cone); height (cylinder, shape); radii ([x,y,z] for a sphere, one per point for a tube); points (shape); profile (revolve); path (tube, world points), smooth (tube); segments (round kinds). Example: { "id": "k3f9a2", "set": { "size": [18, 300, 650] } }.',
   input: z.strictObject({
     id: Id,
     set: z
@@ -305,11 +571,18 @@ const updateEntity = def({
         position: Vec3.optional(),
         rotation: Rotation.optional(),
         size: Size3.optional(),
+        edge_radius: NonNegative.optional(),
         radius: Positive.optional(),
         diameter: Positive.optional(),
+        radius_top: NonNegative.optional(),
+        diameter_top: NonNegative.optional(),
         height: Positive.optional(),
+        radii: z.array(Positive).min(2).max(500).optional(),
         segments: z.int().min(3).max(256).optional(),
         points: z.array(Vec2).min(3).max(500).optional(),
+        profile: z.array(Vec2).min(3).max(500).optional(),
+        path: z.array(Vec3).min(2).max(500).optional(),
+        smooth: z.boolean().optional(),
         color: Color.optional(),
         hole: z.boolean().optional(),
         visible: z.boolean().optional(),
@@ -319,13 +592,37 @@ const updateEntity = def({
   run(ctx, input) {
     const e = ctx.entity(input.id);
     const s = input.set;
-    const wrong = (key: string, kinds: string) => {
-      throw new ApiError('invalid_input', `"${e.name}" is a ${e.kind}; ${key} only applies to ${kinds}`, undefined, `set.${key}`);
+    const KINDS: Record<string, Entity['kind'][]> = {
+      size: ['box'],
+      edge_radius: ['box'],
+      radius: ['cylinder', 'sphere', 'tube'],
+      diameter: ['cylinder', 'sphere', 'tube'],
+      radius_top: ['cylinder'],
+      diameter_top: ['cylinder'],
+      height: ['cylinder', 'extrusion'],
+      radii: ['sphere', 'tube'],
+      segments: ['cylinder', 'sphere', 'revolve', 'tube'],
+      points: ['extrusion'],
+      profile: ['revolve'],
+      path: ['tube'],
+      smooth: ['tube'],
     };
-    if (s.size && e.kind !== 'box') wrong('size', 'boxes');
-    if ((s.radius || s.diameter || s.segments) && e.kind !== 'cylinder') wrong('radius/diameter/segments', 'cylinders');
-    if (s.points && e.kind !== 'extrusion') wrong('points', 'shapes');
-    if (s.height && e.kind === 'box') wrong('height', 'cylinders and shapes (boxes use size)');
+    for (const [key, kinds] of Object.entries(KINDS)) {
+      if ((s as Record<string, unknown>)[key] !== undefined && !kinds.includes(e.kind)) {
+        const plural: Record<Entity['kind'], string> = { box: 'boxes', cylinder: 'cylinders', extrusion: 'shapes', sphere: 'spheres', revolve: 'revolves', tube: 'tubes' };
+        const names = kinds.map((k) => plural[k]);
+        const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0];
+        throw new ApiError('invalid_input', `"${e.name}" is a ${e.kind}; ${key} only applies to ${list}`, undefined, `set.${key}`);
+      }
+    }
+    if (e.kind === 'sphere' && s.radii && s.radii.length !== 3) throw new ApiError('invalid_input', 'A sphere\'s radii are [x, y, z]', undefined, 'set.radii');
+    const pathLength = s.path?.length ?? (e.kind === 'tube' ? e.path.length : 0);
+    if (e.kind === 'tube' && s.radii && s.radii.length !== pathLength) {
+      throw new ApiError('invalid_input', `radii has ${s.radii.length} values for ${pathLength} path points`, undefined, 'set.radii');
+    }
+    if (e.kind === 'tube' && s.path && !s.radii && e.radii && e.radii.length !== s.path.length) {
+      throw new ApiError('invalid_input', 'The new path has a different number of points than radii', 'Give radii too, or radius for a constant tube.', 'set.path');
+    }
     ctx.doc.update(e.id, (x) => {
       if (s.name) x.name = s.name.trim();
       if (s.position) x.position = s.position.map(cleanNumber) as V3;
@@ -333,14 +630,59 @@ const updateEntity = def({
       if (s.color) x.color = s.color;
       if (s.hole !== undefined) x.hole = s.hole;
       if (s.visible !== undefined) x.visible = s.visible;
-      if (x.kind === 'box' && s.size) x.size = s.size.map(cleanNumber) as V3;
-      if (x.kind === 'cylinder') {
-        if (s.radius) x.radius = cleanNumber(s.radius);
-        if (s.diameter) x.radius = cleanNumber(s.diameter / 2);
-        if (s.segments) x.segments = s.segments;
+      const r = s.radius ?? (s.diameter !== undefined ? s.diameter / 2 : undefined);
+      switch (x.kind) {
+        case 'box':
+          if (s.size) x.size = s.size.map(cleanNumber) as V3;
+          if (s.edge_radius !== undefined) {
+            if (s.edge_radius === 0) delete x.edgeRadius;
+            else x.edgeRadius = edgeRadiusFor(x.size, s.edge_radius);
+          } else if (x.edgeRadius && x.edgeRadius > maxEdgeRadius(x.size)) {
+            x.edgeRadius = cleanNumber(maxEdgeRadius(x.size)); // keep it valid when the box shrinks
+          }
+          break;
+        case 'cylinder': {
+          const top = x.radiusTop;
+          if (r !== undefined) x.radius = cleanNumber(r);
+          if (s.height) x.height = cleanNumber(s.height);
+          if (s.segments) x.segments = s.segments;
+          const newTop = s.radius_top ?? (s.diameter_top !== undefined ? s.diameter_top / 2 : undefined);
+          if (newTop !== undefined) setTopRadius(x, newTop);
+          else if (top !== undefined) setTopRadius(x, top);
+          break;
+        }
+        case 'sphere':
+          if (r !== undefined) x.radii = [cleanNumber(r), cleanNumber(r), cleanNumber(r)];
+          if (s.radii) x.radii = s.radii.map(cleanNumber) as V3;
+          if (s.segments) x.segments = Math.max(8, s.segments);
+          break;
+        case 'revolve':
+          if (s.profile) x.profile = s.profile.map(([a, b]) => [cleanNumber(a), cleanNumber(b)]);
+          if (s.segments) x.segments = s.segments;
+          break;
+        case 'tube':
+          if (s.path) {
+            const { position, path } = tubePath(s.path);
+            x.position = position;
+            x.rotation = [0, 0, 0];
+            x.path = path;
+          }
+          if (r !== undefined) {
+            x.radius = cleanNumber(r);
+            delete x.radii;
+          }
+          if (s.radii) {
+            x.radii = s.radii.map(cleanNumber);
+            x.radius = cleanNumber(Math.max(...s.radii));
+          }
+          if (s.smooth !== undefined) x.smooth = s.smooth;
+          if (s.segments) x.segments = Math.min(128, s.segments);
+          break;
+        case 'extrusion':
+          if (s.height) x.height = cleanNumber(s.height);
+          if (s.points) x.points = s.points.map(([a, b]) => [cleanNumber(a), cleanNumber(b)]);
+          break;
       }
-      if (x.kind !== 'box' && s.height) x.height = cleanNumber(s.height);
-      if (x.kind === 'extrusion' && s.points) x.points = s.points.map(([a, b]) => [cleanNumber(a), cleanNumber(b)]);
     });
     return { ids: [e.id] };
   },
@@ -361,11 +703,22 @@ const deleteEntities = def({
 const setHole = def({
   name: 'set_hole',
   kind: 'write',
-  description: 'Make the targeted parts holes (subtracted from overlapping solids) or solids again.',
-  input: z.strictObject({ target: Target, hole: z.boolean() }),
+  description:
+    'Make the targeted parts holes (subtracted from overlapping solids) or solids again. only_own_group: true makes a hole cut only parts in its own group (e.g. a pocket in one part of an assembly that must not cut its neighbours); false: it cuts everything it overlaps (the default).',
+  input: z.strictObject({ target: Target, hole: z.boolean(), only_own_group: z.boolean().optional() }),
   run(ctx, input) {
     const parts = ctx.resolve(input.target);
-    for (const e of parts) ctx.doc.update(e.id, (x) => (x.hole = input.hole));
+    if (input.only_own_group && input.hole) {
+      const loose = parts.find((e) => !e.groupId);
+      if (loose) throw new ApiError('invalid_input', `"${loose.name}" is not in a group, so "its own group" means nothing`, 'Group it with the parts it should cut first.', 'only_own_group');
+    }
+    for (const e of parts) {
+      ctx.doc.update(e.id, (x) => {
+        x.hole = input.hole;
+        if (!input.hole || input.only_own_group === false) delete x.holeScope;
+        else if (input.only_own_group) x.holeScope = 'group';
+      });
+    }
     return { ids: parts.map((e) => e.id) };
   },
 });
@@ -790,14 +1143,31 @@ const redo = def({
 const renderViews = def({
   name: 'render_views',
   kind: 'host',
-  description: 'Render PNG images of the model from standard views to check shape and alignment visually. Use sparingly: images cost tokens.',
+  description:
+    'Render PNG images of the model from standard views to check shape and alignment visually. explode (0–1) renders it pulled apart (how parts fit together) without changing the user\'s view. Use sparingly: images cost tokens.',
   input: z.strictObject({
     views: z.array(z.enum(['iso', 'top', 'front', 'right', 'left', 'back', 'bottom'])).min(1).max(4).optional(),
     size: z.int().min(256).max(1024).optional(),
+    explode: z.number().min(0).max(1).optional(),
+    explode_axis: Axis.optional(),
   }),
   async runAsync(ctx, input) {
     if (!ctx.host?.renderViews) throw new ApiError('unsupported', 'This host cannot render images', 'Open the model in the app (live bridge) to get images.');
-    return { images: await ctx.host.renderViews((input.views ?? ['iso']) as ViewName[], input.size ?? 768) };
+    const opts = input.explode !== undefined ? { explode: input.explode, axis: input.explode_axis } : undefined;
+    return { images: await ctx.host.renderViews((input.views ?? ['iso']) as ViewName[], input.size ?? 768, opts) };
+  },
+});
+
+const explodeView = def({
+  name: 'explode_view',
+  kind: 'host',
+  description:
+    'Show the model pulled apart in the app (an exploded view: how the parts fit together). factor 0 = assembled, 1 = fully apart; axis limits it to one direction (e.g. z lifts parts apart vertically). Top-level groups move as units. View only: the model and undo history are untouched.',
+  input: z.strictObject({ factor: z.number().min(0).max(1), axis: Axis.optional() }),
+  async runAsync(ctx, input) {
+    if (!ctx.host?.setExplode) throw new ApiError('unsupported', 'Only the app has an exploded view', 'Use render_views { explode } in the app, or ask the user to open it and click Connect AI.');
+    ctx.host.setExplode(input.factor, input.axis ?? null);
+    return { factor: input.factor, axis: input.axis ?? 'all' };
   },
 });
 
@@ -858,11 +1228,228 @@ const exportStlOp = def({
     const host = files(ctx);
     if (!/\.stl$/i.test(input.path)) throw new ApiError('invalid_input', 'The file name must end in .stl', undefined, 'path');
     const targets = input.target ? ctx.resolve(input.target) : ctx.doc.entities;
-    const data = exportStl(targets, ctx.doc.entities);
+    const data = exportStl(targets, ctx.doc.entities, ctx.doc.groups);
     if (!data) throw new ApiError('not_found', 'Nothing to export', 'Only visible solid parts (not holes) are exported.');
     const shown = await host.write(input.path, new Uint8Array(data));
     const solids = targets.filter((e) => e.visible && !e.hole).length;
     return { path: shown, solids, triangles: (data.byteLength - 84) / 50, bytes: data.byteLength };
+  },
+});
+
+// ---- annotations (ADR 0015) ----------------------------------------------------------------
+
+const PointRef = z
+  .union([
+    Vec3,
+    z.strictObject({
+      part: Id.describe('Part id or exact name'),
+      at: z.tuple([Num, Num, Num]).optional().describe("Fractions of the part's own box: [0,0,0] min corner, [1,1,1] max corner, [0.5,0.5,1] top centre (default)"),
+    }),
+  ])
+  .describe('A world point [x, y, z] (mm), or a point on a part { part, at }. Points on parts follow the part when it moves or is resized.');
+type PointRefInput = z.infer<typeof PointRef>;
+
+const AxisName = z.enum(['x', 'y', 'z']);
+const Side = z.enum(['+x', '-x', '+y', '-y', '+z', '-z']).describe('Which way the dimension line sits from the measured points');
+const AnnotationText = z.string().trim().min(1).max(MAX_ANNOTATION_TEXT);
+
+function anchorOf(ctx: OperationContext, p: PointRefInput): Anchor {
+  if (Array.isArray(p)) return { point: p.map(cleanNumber) as V3 };
+  const e = ctx.part(p.part);
+  return { entity: e.id, at: (p.at ?? [0.5, 0.5, 1]).map(cleanNumber) as V3 };
+}
+
+const sideVector = (side: string) => {
+  const v = AXIS_VECTORS[side[1] as 'x' | 'y' | 'z'].clone();
+  return side[0] === '-' ? v.negate() : v;
+};
+
+/**
+ * Offset of a dimension line: `distance` (default: 15% of the length, 10–500 mm) towards
+ * `side`, or away from the centre of the parts it measures.
+ */
+function dimensionOffset(dir: THREE.Vector3, length: number, mid: THREE.Vector3, center: THREE.Vector3 | null, distance?: number, side?: string): V3 {
+  const dist = distance ?? Math.min(500, Math.max(10, Math.round(length * 0.15)));
+  let v: THREE.Vector3 | null = null;
+  if (side) {
+    v = sideVector(side);
+    v.addScaledVector(dir, -v.dot(dir));
+    if (v.lengthSq() < 1e-6) throw new ApiError('invalid_input', `side ${side} is along the dimension itself`, 'Pick a side perpendicular to what you measure.', 'side');
+  } else {
+    let best = -1;
+    const away = center ? mid.clone().sub(center) : new THREE.Vector3();
+    for (const axis of ['z', 'y', 'x'] as const) {
+      const a = AXIS_VECTORS[axis];
+      if (Math.abs(a.dot(dir)) > 0.1) continue;
+      const score = Math.abs(away.dot(a));
+      if (score > best + 1e-6) {
+        best = score;
+        v = a.clone().multiplyScalar(away.dot(a) < 0 ? -1 : 1);
+      }
+    }
+    if (!v || best < 1e-6) v = Math.abs(dir.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, -1, 0);
+    v.addScaledVector(dir, -v.dot(dir));
+    if (v.lengthSq() < 1e-6) v = new THREE.Vector3(0, 0, 1).cross(dir);
+  }
+  return cleanVec(v.normalize().multiplyScalar(dist));
+}
+
+/** The part of an offset vector perpendicular to the dimension (the dimension line can't slide along itself). */
+function perpendicular(v: number[], dir: THREE.Vector3): V3 {
+  const o = vec(v);
+  return cleanVec(o.addScaledVector(dir, -o.dot(dir)));
+}
+
+function addDimensionTo(ctx: OperationContext, from: Anchor, to: Anchor, opts: { axis?: 'x' | 'y' | 'z'; distance?: number; vector?: number[]; side?: string; text?: string }): Annotation {
+  const get = (id: string) => ctx.doc.get(id);
+  const probe = dimensionGeometry({ id: '', kind: 'dimension', from, to, offset: [0, 0, 0], axis: opts.axis }, get)!;
+  if (probe.value < 1e-6) throw new ApiError('invalid_geometry', 'The two points are the same along what you measure', opts.axis ? `Check the ${opts.axis} coordinates.` : undefined);
+  const parts = [from, to].flatMap((x) => ('entity' in x ? [ctx.doc.get(x.entity)!] : []));
+  const center = parts.length ? boundsOf(parts).getCenter(new THREE.Vector3()) : null;
+  const mid = probe.a.clone().add(probe.b).multiplyScalar(0.5);
+  const d: Annotation = {
+    id: newId(),
+    kind: 'dimension',
+    from,
+    to,
+    offset: opts.vector ? perpendicular(opts.vector, probe.dir) : dimensionOffset(probe.dir, probe.value, mid, center, opts.distance, opts.side),
+    ...(opts.axis ? { axis: opts.axis } : {}),
+    ...(opts.text ? { text: opts.text } : {}),
+  };
+  ctx.doc.addAnnotation(d);
+  return d;
+}
+
+const addNote = def({
+  name: 'add_note',
+  kind: 'write',
+  description:
+    'Add a text note (annotation, not geometry), e.g. "Oak top, 18 mm" or "drill on site". It sits at `at` (a point, or { part, at } to stay attached to a part), with a leader line when label_offset moves the text away.',
+  input: z.strictObject({
+    text: AnnotationText,
+    at: PointRef,
+    label_offset: Vec3.optional().describe('Where the text goes relative to the point, mm (default: on the point, no leader)'),
+  }),
+  run(ctx, input) {
+    const a: Annotation = { id: newId(), kind: 'note', text: input.text, anchor: anchorOf(ctx, input.at), offset: input.label_offset ? cleanVec(vec(input.label_offset)) : [0, 0, 0] };
+    ctx.doc.addAnnotation(a);
+    return { ids: [], annotation: annotationLine(a, ctx.doc) };
+  },
+});
+
+const addDimension = def({
+  name: 'add_dimension',
+  kind: 'write',
+  description:
+    'Add a dimension between two points (or { part, at } points, which keep it updated when parts move or resize). axis measures along x, y or z only; otherwise the true distance. The line sits offset mm (default ~15% of the length) towards side (default: away from the parts). text overrides the value; "<>" inserts it.',
+  input: z.strictObject({
+    from: PointRef,
+    to: PointRef,
+    axis: AxisName.optional(),
+    offset: z.union([Num, Vec3]).optional().describe('Distance from the measured points to the dimension line, mm (or an exact offset vector)'),
+    side: Side.optional(),
+    text: AnnotationText.optional(),
+  }),
+  run(ctx, input) {
+    const vector = Array.isArray(input.offset) ? input.offset : undefined;
+    const distance = typeof input.offset === 'number' ? input.offset : undefined;
+    const d = addDimensionTo(ctx, anchorOf(ctx, input.from), anchorOf(ctx, input.to), { axis: input.axis, distance, vector, side: input.side, text: input.text });
+    return { ids: [], annotation: annotationLine(d, ctx.doc) };
+  },
+});
+
+const dimensionParts = def({
+  name: 'dimension_parts',
+  kind: 'write',
+  description:
+    'Add overall dimensions of the targeted parts (e.g. a whole cabinet or group): one per axis (default x, y and z), attached to the outermost parts so they update when the model changes. Width (x) sits above, depth (y) and height (z) to the left.',
+  input: z.strictObject({
+    target: Target,
+    axes: z.array(AxisName).min(1).max(3).optional(),
+    offset: Num.optional().describe('Distance from the parts to the dimension lines, mm'),
+  }),
+  run(ctx, input) {
+    const parts = ctx.resolve(input.target).filter((e) => !e.hole);
+    if (!parts.length) throw new ApiError('not_found', 'The target has only holes', 'Dimension solid parts.');
+    const box = boundsOf(parts);
+    const lines: string[] = [];
+    const plan = { x: { other: [box.min.y, box.max.z], side: '+z' }, y: { other: [box.min.x, box.max.z], side: '-x' }, z: { other: [box.min.x, box.min.y], side: '-x' } } as const;
+    for (const axis of input.axes ?? (['x', 'y', 'z'] as const)) {
+      const i = AXIS_INDEX[axis];
+      if (box.max.getComponent(i) - box.min.getComponent(i) < 1e-6) continue;
+      const point = (value: number) => {
+        const p = new THREE.Vector3();
+        const others = [0, 1, 2].filter((k) => k !== i);
+        p.setComponent(i, value);
+        p.setComponent(others[0], plan[axis].other[0]);
+        p.setComponent(others[1], plan[axis].other[1]);
+        return p;
+      };
+      const extreme = (pick: 'min' | 'max') =>
+        parts.reduce((best, e) => {
+          const v = worldBounds(e)[pick].getComponent(i);
+          const bv = worldBounds(best)[pick].getComponent(i);
+          return (pick === 'min' ? v < bv : v > bv) ? e : best;
+        });
+      const from = anchorFor(point(box.min.getComponent(i)), extreme('min'));
+      const to = anchorFor(point(box.max.getComponent(i)), extreme('max'));
+      lines.push(annotationLine(addDimensionTo(ctx, from, to, { axis, distance: input.offset, side: plan[axis].side }), ctx.doc));
+    }
+    return { ids: [], annotations: lines };
+  },
+});
+
+const updateAnnotation = def({
+  name: 'update_annotation',
+  kind: 'write',
+  description:
+    'Change an annotation: text (a dimension\'s override; "" restores the measured value), a note\'s label_offset, or a dimension\'s offset distance and side.',
+  input: z.strictObject({
+    id: Id,
+    text: z.string().max(MAX_ANNOTATION_TEXT).optional(),
+    label_offset: Vec3.optional(),
+    offset: Num.optional(),
+    side: Side.optional(),
+  }),
+  run(ctx, input) {
+    const a = ctx.annotation(input.id);
+    if (a.kind === 'note' && (input.offset !== undefined || input.side)) throw new ApiError('invalid_input', 'Notes use label_offset', undefined, 'offset');
+    if (a.kind === 'dimension' && input.label_offset) throw new ApiError('invalid_input', 'Dimensions use offset and side', undefined, 'label_offset');
+    if (a.kind === 'note' && input.text !== undefined && !input.text.trim()) throw new ApiError('invalid_input', 'A note needs text', 'Use delete_annotations to remove it.', 'text');
+    let offset: V3 | undefined;
+    if (a.kind === 'dimension' && (input.offset !== undefined || input.side)) {
+      const g = dimensionGeometry(a, (id) => ctx.doc.get(id))!;
+      const current = vec(a.offset);
+      const dist = input.offset ?? current.length();
+      const side = input.side ? sideVector(input.side) : current.lengthSq() > 1e-9 ? current : new THREE.Vector3(0, 0, 1);
+      side.addScaledVector(g.dir, -side.dot(g.dir));
+      if (side.lengthSq() < 1e-9) throw new ApiError('invalid_input', `side ${input.side} is along the dimension itself`, undefined, 'side');
+      offset = cleanVec(side.normalize().multiplyScalar(dist));
+    }
+    ctx.doc.updateAnnotation(a.id, (x) => {
+      if (input.text !== undefined) {
+        if (x.kind === 'note') x.text = input.text.trim();
+        else if (input.text.trim()) x.text = input.text.trim();
+        else delete x.text;
+      }
+      if (x.kind === 'note' && input.label_offset) x.offset = cleanVec(vec(input.label_offset));
+      if (x.kind === 'dimension' && offset) x.offset = offset;
+    });
+    return { ids: [], annotation: annotationLine(ctx.doc.getAnnotation(a.id)!, ctx.doc) };
+  },
+});
+
+const deleteAnnotations = def({
+  name: 'delete_annotations',
+  kind: 'write',
+  description: 'Remove annotations by id, or all of them. Parts are not affected.',
+  input: z
+    .strictObject({ ids: z.array(Id).min(1).optional(), all: z.literal(true).optional() })
+    .refine((v) => (v.ids ? 1 : 0) + (v.all ? 1 : 0) === 1, 'give exactly one of ids or all'),
+  run(ctx, input) {
+    const ids = input.all ? ctx.doc.annotations.map((a) => a.id) : input.ids!.map((id) => ctx.annotation(id).id);
+    ctx.doc.removeAnnotations(ids);
+    return { ids: [], removed: ids.length };
   },
 });
 
@@ -1057,6 +1644,10 @@ export const OPERATIONS: OperationDef<any>[] = [
   addBox,
   addCylinder,
   addShape,
+  addSphere,
+  addRevolve,
+  addTube,
+  splitForPrint,
   updateEntity,
   deleteEntities,
   setHole,
@@ -1080,9 +1671,15 @@ export const OPERATIONS: OperationDef<any>[] = [
   undo,
   redo,
   renderViews,
+  explodeView,
   openFile,
   saveFile,
   exportStlOp,
+  addNote,
+  addDimension,
+  dimensionParts,
+  updateAnnotation,
+  deleteAnnotations,
   importDxf,
   getReference,
   updateReference,

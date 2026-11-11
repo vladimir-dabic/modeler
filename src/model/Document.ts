@@ -1,5 +1,6 @@
 import { pruneGroups } from './groups';
-import type { DocumentFile, DrawingGeometry, Entity, EntityKind, Group, ReferenceDrawing, ReferenceFile, Unit } from './types';
+import { pruneAnnotations } from './annotations';
+import type { Annotation, DocumentFile, DrawingGeometry, Entity, EntityKind, Group, ReferenceDrawing, ReferenceFile, Unit } from './types';
 import { DEFAULT_PRINTER_SETTING, type PrinterSetting, type WorkspaceId } from './workspaces';
 
 export interface ChangeEvent {
@@ -18,6 +19,9 @@ const KIND_LABEL: Record<EntityKind, string> = {
   box: 'Box',
   cylinder: 'Cylinder',
   extrusion: 'Shape',
+  sphere: 'Sphere',
+  revolve: 'Revolve',
+  tube: 'Tube',
 };
 
 export function newId(): string {
@@ -40,6 +44,10 @@ interface UndoEntry {
 export class ModelDocument {
   entities: Entity[] = [];
   groups: Group[] = [];
+  /** Notes and dimensions (ADR 0015), attached to parts; never geometry. */
+  annotations: Annotation[] = [];
+  /** Selected annotations. UI state; exclusive with the part selection. */
+  readonly annotationSelection = new Set<string>();
   /** Reference drawings (ADR 0014): traced and snapped to, never part of the model. */
   references: ReferenceDrawing[] = [];
   /**
@@ -103,6 +111,10 @@ export class ModelDocument {
 
   getGroup(id: string): Group | undefined {
     return this.groups.find((g) => g.id === id);
+  }
+
+  getAnnotation(id: string): Annotation | undefined {
+    return this.annotations.find((a) => a.id === id);
   }
 
   getReference(id: string): ReferenceDrawing | undefined {
@@ -237,15 +249,22 @@ export class ModelDocument {
   }
 
   private snapshot(): string {
-    return JSON.stringify({ entities: this.entities, groups: this.groups, references: this.references });
+    return JSON.stringify({ entities: this.entities, groups: this.groups, references: this.references, annotations: this.annotations });
   }
 
   private restore(snapshot: string) {
-    const state = JSON.parse(snapshot) as { entities: Entity[]; groups: Group[]; references: ReferenceDrawing[] };
+    const state = JSON.parse(snapshot) as { entities: Entity[]; groups: Group[]; references: ReferenceDrawing[]; annotations: Annotation[] };
     this.entities = state.entities;
     this.groups = state.groups;
     this.references = state.references;
+    this.annotations = state.annotations;
     let selectionChanged = false;
+    for (const id of [...this.annotationSelection]) {
+      if (!this.getAnnotation(id)) {
+        this.annotationSelection.delete(id);
+        selectionChanged = true;
+      }
+    }
     for (const id of [...this.selection]) {
       if (!this.get(id)) {
         this.selection.delete(id);
@@ -278,7 +297,10 @@ export class ModelDocument {
     this.autoTx(() => {
       this.entities = this.entities.filter((e) => !set.has(e.id));
       this.groups = pruneGroups(this.entities, this.groups);
+      // Annotations attached to deleted parts go with them (ADR 0015).
+      this.annotations = pruneAnnotations(this.annotations, (id) => this.get(id));
     });
+    for (const id of [...this.annotationSelection]) if (!this.getAnnotation(id)) this.annotationSelection.delete(id);
     let selectionChanged = false;
     for (const id of set) selectionChanged = this.selection.delete(id) || selectionChanged;
     if (this.openGroupId && !this.getGroup(this.openGroupId)) {
@@ -293,6 +315,28 @@ export class ModelDocument {
     this.autoTx(() => {
       this.groups = pruneGroups(this.entities, groups);
     });
+  }
+
+  addAnnotation(a: Annotation): Annotation {
+    this.autoTx(() => this.annotations.push(a));
+    return a;
+  }
+
+  updateAnnotation(id: string, mutate: (a: Annotation) => void): void {
+    const a = this.getAnnotation(id);
+    if (!a) return;
+    this.autoTx(() => mutate(a));
+  }
+
+  removeAnnotations(ids: Iterable<string>): void {
+    const set = new Set(ids);
+    if (!set.size) return;
+    this.autoTx(() => {
+      this.annotations = this.annotations.filter((a) => !set.has(a.id));
+    });
+    let changed = false;
+    for (const id of set) changed = this.annotationSelection.delete(id) || changed;
+    if (changed) this.emitSelection();
   }
 
   /** Add a reference drawing with its (immutable) geometry. */
@@ -343,7 +387,12 @@ export class ModelDocument {
 
   setSelection(ids: Iterable<string>): void {
     const next = new Set(ids);
-    if (next.size === this.selection.size && [...next].every((id) => this.selection.has(id))) return;
+    const hadAnnotations = this.annotationSelection.size > 0;
+    this.annotationSelection.clear();
+    if (next.size === this.selection.size && [...next].every((id) => this.selection.has(id))) {
+      if (hadAnnotations) this.emitSelection();
+      return;
+    }
     this.selection.clear();
     for (const id of next) if (this.get(id)) this.selection.add(id);
     this.emitSelection();
@@ -367,6 +416,18 @@ export class ModelDocument {
     this.setSelection([]);
   }
 
+  /** Select annotations (clears the part selection; the two are exclusive). */
+  selectAnnotations(ids: Iterable<string>, add = false): void {
+    if (!add) this.annotationSelection.clear();
+    for (const id of ids) {
+      if (!this.getAnnotation(id)) continue;
+      if (add && this.annotationSelection.has(id)) this.annotationSelection.delete(id);
+      else this.annotationSelection.add(id);
+    }
+    this.selection.clear();
+    this.emitSelection();
+  }
+
   setOpenGroup(id: string | null): void {
     if (id === this.openGroupId) return;
     this.openGroupId = id && this.getGroup(id) ? id : null;
@@ -376,7 +437,7 @@ export class ModelDocument {
   // ---- whole document -----------------------------------------------------
 
   toFile(): DocumentFile {
-    const state = JSON.parse(this.snapshot()) as { entities: Entity[]; groups: Group[]; references: ReferenceDrawing[] };
+    const state = JSON.parse(this.snapshot()) as { entities: Entity[]; groups: Group[]; references: ReferenceDrawing[]; annotations: Annotation[] };
     const references: ReferenceFile[] = state.references.map((r) => ({ ...r, geometry: this.drawingGeometry.get(r.id) ?? { layers: [], paths: [] } }));
     return {
       format: 'modeler',
@@ -387,6 +448,7 @@ export class ModelDocument {
       entities: state.entities,
       groups: state.groups,
       ...(references.length ? { references } : {}),
+      ...(state.annotations.length ? { annotations: state.annotations } : {}),
     };
   }
 
@@ -410,12 +472,14 @@ export class ModelDocument {
       this.entities = file.entities;
       this.groups = groups;
       this.references = references;
+      this.annotations = file.annotations ?? [];
       this.emitChange(true);
     } else {
       this.transact(() => {
         this.entities = file.entities;
         this.groups = groups;
         this.references = references;
+        this.annotations = file.annotations ?? [];
       }, label);
     }
     this.clearSelection();

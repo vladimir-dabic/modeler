@@ -94,6 +94,31 @@ type Target =
 - **A plain name that matches several parts** is `ambiguous`, and the error lists their ids. Wildcards and filters are explicit about wanting many, so nothing is ever changed by guesswork.
 - **Grouped parts move as one:** operations that move things (`distribute`, …) keep a group together when *all* its members are targeted.
 
+## Views
+
+- `explode_view { factor 0–1, axis? }` (host, app only) shows the model pulled apart, with groups as units. View state only: no undo step, nothing saved.
+- `render_views { views?, size?, explode?, explode_axis? }` can render exploded images without changing the user's view.
+
+## Printing
+
+- `set_hole { target, hole, only_own_group? }`: `only_own_group: true` scopes a hole to its group ([ADR 0018](adr/0018-print-workflow-fuse-scope-split.md)).
+- `split_for_print { target, axis?, at?, gap?, pegs?, peg_diameter?, peg_depth?, clearance?, name? }` replaces the target with two parametric pieces with pegs and clearance holes. The result lists the pieces, the peg count and size, and `notes` if pegs had to shrink or didn't fit.
+- `export_stl` writes one fused, watertight solid. The `check_print` / `get_quantities` totals count overlapping parts once.
+
+## Annotations
+
+Notes and dimensions ([ADR 0015](adr/0015-annotations-notes-and-dimensions.md)). A point is `[x, y, z]`, or `{ part, at }` with `at` = fractions of the part's own box (`[0.5, 0.5, 1]`, top centre, is the default). Points on parts keep the annotation attached.
+
+| Operation | |
+|---|---|
+| `add_note { text, at, label_offset? }` | A label, with a leader when `label_offset` moves it away |
+| `add_dimension { from, to, axis?, offset?, side?, text? }` | `axis` measures along x/y/z; `offset` is a distance in mm (default ~15% of the length) or an exact vector; `side` (`+z`, `-y`…) sets the direction, default: away from the parts; `text` overrides the value, with `<>` = value |
+| `dimension_parts { target, axes?, offset? }` | Overall dimensions of a part or group in one call, attached to its outermost parts |
+| `update_annotation { id, text?, label_offset?, offset?, side? }` | |
+| `delete_annotations { ids \| all }` | |
+
+`get_scene` lists them under `annotations`, e.g. `a1 dimension 600 along x: "Left side" at 0,0,1 → "Right side" at 1,0,1, offset 0,0,90`. `render_views` draws the labels into its images.
+
 ## Reference drawings
 
 Imported plans the model is built on ([ADR 0014](adr/0014-exchange-formats-and-reference-drawings.md)). They are not parts, so selectors never match them.

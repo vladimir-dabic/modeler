@@ -72,7 +72,7 @@ describe('meshVolume', () => {
       id: 'h', name: 'h', kind: 'cylinder', position: [10, 10, -1], rotation: [0, 0, 0],
       radius: 5, height: 12, segments: 128, color: '#fff', hole: true, visible: true,
     };
-    const [{ geometry }] = buildWorldGeometries([solid], [solid, hole]);
+    const [{ geometry }] = buildWorldGeometries([solid], [solid, hole], []);
     const expected = 20 * 20 * 10 - Math.PI * 25 * 10;
     // Faceted cylinder + the 0.01 mm cutter growth: within 0.5 %.
     expect(meshVolume(geometry)).toBeGreaterThan(expected * 0.995);

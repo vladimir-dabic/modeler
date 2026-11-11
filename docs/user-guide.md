@@ -21,7 +21,15 @@ The snap step you set is remembered per workspace.
 - **Printer:** choose a profile (Bambu Lab, Prusa, Creality, Elegoo, Anycubic, Voron) or *Custom size*. Check your printer's spec sheet if unsure. The bed's front-left corner is the origin, as in slicers.
 - **Fit check:** parts that are off the bed, too tall, below the bed, or floating turn red, and so does the build volume when something is outside it. The Print tab lists each problem; click a name to jump to the part.
 - **Place on plate:** centres the selection (or everything) on the bed and sets it down on z = 0.
-- **Volume and weight:** the volume has holes removed; the weight is for the filament you pick, at **100 % infill**. Your slicer's estimate will be lower.
+- **Volume and weight:** the volume has holes removed, and overlapping parts count once. The weight is for the filament you pick, at **100 % infill**; your slicer's estimate will be lower.
+- **STL export** fuses everything it exports into **one watertight solid**: overlapping parts merge, separate parts stay separate pieces. You never need a "merge" step.
+- **Split for printing:** right-click a part or group → *Split for printing* cuts it horizontally through the middle into two pieces, *Name 1* and *Name 2*:
+  - the upper piece is lifted 10 mm so you can see the cut;
+  - the lower piece gets **pegs** (Ø5 mm by default, smaller on thin walls) and the upper one matching holes 0.2 mm larger, so they line up and glue;
+  - the halves that are cut away are quiet helper holes, visible only when selected;
+  - one undo brings the original back.
+  
+  To cut elsewhere, along X/Y, or with other peg sizes, ask Claude (`split_for_print { at, axis, pegs, peg_diameter, clearance }`).
 
 ### Workshop
 
@@ -39,12 +47,15 @@ Default keys are shown; all of them can be changed (see [Shortcuts](#shortcuts))
 |---|---|---|
 | Select | `Space` | Click an object (a whole group selects as one; double-click opens it); ⌘/Ctrl-click adds or removes. Drag left→right to select objects fully inside the box, right→left to select anything it touches |
 | Box | `B` | Click a corner, click the opposite corner, move up and click for the height. Works on any face |
-| Cylinder | `C` | Click the centre, then the radius, then the height. Type `d8` for an 8 mm diameter |
+| Cylinder | `C` | Click the centre, then the radius, then the height. Type `d8` for an 8 mm diameter. For a **cone**, set *Top ⌀* in Properties (0 = pointed, larger than the base = a countersink when it's a hole) |
+| Sphere | — | Click where it should sit (the ground or a face), move to size it and click, or type a radius (`d40` = 40 mm diameter). For an **egg / ellipsoid**, give it different diameters in Properties |
 | Line / Shape | `L` | Click points to draw an outline; click the first point (or press Enter) to close it, then set the thickness. Backspace removes the last point |
 | Push/Pull | `P` | Click (or drag) a face. Boxes: any face. Cylinders: top/bottom (height) or the side (radius). Shapes: top or bottom |
 | Move / Copy | `M` | Click a base point (corners snap), then the destination. Tap `Alt/Option` to copy |
 | Rotate | `Q` | Click the pivot, then a reference direction, then the angle (snaps every 15°) |
 | Tape measure | `T` | Click two points; Δx/Δy/Δz show in the status bar |
+| Dimension | `D` | Click two points (corners snap; arrow keys measure along one axis), move to place the dimension line, click. See [Notes and dimensions](#notes-and-dimensions) |
+| Text / note | `N` | Click a part (or anywhere), move to place the text and click (same spot = no leader line), type, Enter |
 | Eraser | `E` | Click an object to delete it |
 | Orbit / Pan | `O` / `H` | Left-drag orbits or pans (handy on a trackpad) |
 
@@ -78,6 +89,8 @@ Free points are rounded to the snap step (top bar, toggle with `G`). Arrow keys 
 
 Draw a box or cylinder on a face and push it **into** the face: it becomes a hole automatically. Tap `Alt/Option` while drawing to toggle solid/hole. Any part can also be switched between *Solid* and *Hole* in Properties. Holes are subtracted from every solid they overlap, both on screen and in the STL.
 
+**Holes in a group** can be limited to that group: tick *Cuts only its own group* in Properties. For example, a pocket in the lid of a box then won't cut the base under it. Holes are exact and watertight (the Manifold engine), even when they're flush with a surface.
+
 ## Typing measurements
 
 While a tool is active, just start typing digits; they go into the measurement box (bottom right). Press Enter to apply.
@@ -103,6 +116,20 @@ Right after finishing an operation, typing a new value **changes that last opera
 - `Z` zooms to fit everything, `Shift+Z` zooms to the selection, and the top-bar buttons give standard views (Iso, Top, Front, Right, Left, Back) and perspective/orthographic.
 - Orbiting below the floor hides the grid, so you see the model's underside.
 
+### Exploded view
+
+**Explode** in the top bar (`X`) pulls the model apart, so you can see every piece and how it fits together. The base stays on the floor and the other parts rise and spread above it, on a clean background (no grid, axes, bed or plans):
+- **What moves together:** groups move as one unit, so a cabinet stays a cabinet next to the lamp on top of it. **Open a group** (double-click) and its own parts come apart: the boards of the cabinet, then the parts of a drawer inside it, level by level.
+- **The panel at the top right:** the slider sets how far apart, *All / X / Y / Z* limits the direction (Z just lifts parts up and down), and × puts it back together.
+- **It's only a view.** Nothing moves in the model, there is nothing to undo, and saving and exporting use the assembled model. Notes and dimensions hide while exploded.
+- **Look only:**
+  - **Works while exploded:** select, orbit, pan, zoom, open groups, export.
+  - **Refused, with a hint:** Delete, undo, typing in Properties, and right-click edits.
+  - **Puts it back together first:** picking a drawing or editing tool, New, Open or Import.
+- If Claude changes something while it's exploded, the view reassembles first so you see the change in place.
+
+Claude can show it too (*"explode the cabinet"*), or render exploded images to check its work without changing your view.
+
 ## Shortcuts
 
 Press `?` (or the keyboard button, top right) for the full list.
@@ -113,6 +140,35 @@ Press `?` (or the keyboard button, top right) for the full list.
 - **Keyboard layouts:** with a non-Latin layout (e.g. Cyrillic), shortcuts follow the physical key position.
 
 Customisations are saved in the browser.
+
+### Rounded and smooth parts
+
+- **Round edges:** a box's *Round edges* field in Properties rounds every edge and corner (printed enclosures, soft blocks).
+- **Revolved shapes** (vases, cups, knobs, turned legs) and **tubes** (handles, tails, cables, rails: smooth through a list of points, optionally tapering) are created through the API, so ask Claude over MCP, e.g. *"add a cup 90 mm tall"* or *"a handle tube from here to there"*. Once they exist, you can move, rotate, copy, mirror, colour and cut them like any part, and change a tube's diameter in Properties.
+
+## Notes and dimensions
+
+Annotations explain the model to whoever builds it. They are **not geometry**: they're never exported, cut or counted.
+
+- **Dimension (`D`):**
+  1. Click two points. Corners, midpoints and centres snap; the arrow keys measure along X, Y or Z only.
+  2. Move to choose where the dimension line sits, then click.
+  
+  The value is always measured and shown in the display units.
+- **Text (`N`):**
+  1. Click a point on a part (or empty space).
+  2. Move away to draw a leader line and click. Clicking the same spot gives a plain label.
+  3. Type the text and press Enter. Shift+Enter adds a new line.
+- **Attached to parts:** dimensions and notes clicked on a part stay attached to it. Move, rotate or resize the part and they follow (a cabinet dimension shows the new width). Delete the part and they go with it. Hide it and they hide too.
+- **Edit with the Select tool:**
+  - click a label (or a dimension line) to select it;
+  - drag it to move the text or slide the dimension line;
+  - double-click to edit the text in place; `Del` deletes.
+  
+  The Properties panel has the text, a dimension's text override (`<>` inserts the measured value, e.g. `<> clear`) and its offset. Objects lists all annotations.
+- **Show / hide all:** the *Show / hide notes and dimensions* command (bind it a key in `?`).
+
+Claude can annotate too. For example, *"dimension the cabinet"* adds overall dimensions in one step (`dimension_parts`).
 
 ## Reference drawings (DXF import)
 
@@ -146,9 +202,17 @@ Each AI change shows briefly at the bottom (*AI: Bookcase*) and is a normal undo
 
 ## Files
 
-- **Autosave:** the model is saved to the browser continuously and restored when you come back.
-- **Save / Open:** a `.modeler.json` project (includes the workspace and printer). You can also drag a project file onto the window.
-- **New:** starts an empty model in the current workspace. Undo brings the previous one back.
+Projects are `.modeler.json` files: plain JSON with everything in it (parts, groups, notes and dimensions, reference drawings, workspace, printer). The name of the file you're editing is shown next to *Modeler* in the top bar and in the window title, with a **•** while it has unsaved changes.
+
+- **Save (`⌘/Ctrl+S`):**
+  - The first time, it asks where to save. After that it **saves back to the same file**.
+  - **In Chrome and Edge**, a project you opened or dropped onto the window also saves back in place. The browser asks once for permission to edit the file.
+  - **In Safari and Firefox**, which can't write to files, Save downloads a copy instead.
+- **Save as (`⇧⌘/Ctrl+Shift+S`):** saves to a new file, which becomes the current one.
+- **Open (`⌘/Ctrl+O`),** or drag a project file onto the window. Opening is one undo step, so `⌘Z` brings back what you had.
+- **Open recent:** the **▾** next to Open lists the last 8 projects (Chrome and Edge).
+- **Autosave:** the model is also saved to the browser continuously and restored when you come back, still linked to its file, so `⌘S` keeps saving to it.
+- **New:** starts an empty, *Untitled* model in the current workspace. Undo brings the previous one back.
 - **STL:** exports the selection, or everything, in mm with holes applied.
 - **Cut list CSV:** from the Cut list tab.
 

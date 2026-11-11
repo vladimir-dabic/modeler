@@ -7,13 +7,15 @@
     "build:mcp": "node mcp/build.mjs",
     "preview": "vite preview",
     "test": "vitest run",
+    "bench:csg": "BENCH=1 vitest run tests/csg-bench.test.ts && cat test-results/csg-bench.md",
     "typecheck": "tsc --noEmit",
     "smoke": "node scripts/smoke.mjs",
     "docs:api": "UPDATE_DOCS=1 vitest run tests/api-reference.test.ts",
-    "mcp": "node mcp/dist/modeler-mcp.mjs"
+    "mcp": "node mcp/run.mjs"
   },
   "description": "Simple SketchUp-style 3D modeler for 3D printing and woodworking",
   "dependencies": {
+    "manifold-3d": "^3.5.4",
     "three": "^0.187.0",
     "three-bvh-csg": "^0.0.18",
     "three-mesh-bvh": "^0.9.18",

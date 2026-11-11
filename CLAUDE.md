@@ -15,11 +15,12 @@ The UI, the in-app AI assistant and the MCP server are all clients of one typed,
 - `npm test`: vitest unit tests in `tests/`.
 - `npm run smoke`: Playwright drives the real UI in headless system Chrome. Needs the dev server running. Run it after changing tools, viewport or UI wiring.
 - `npm run typecheck` / `npm run build`.
-- `npm run build:mcp`: bundles the MCP server (`mcp/`, [mcp/README.md](mcp/README.md)) to `mcp/dist/modeler-mcp.mjs`. Rebuild after changing `src/api`/`src/model`/`mcp/src`. MCP tests: `tests/mcp.test.ts`; the smoke test also drives the built bundle.
+- `npm run build:mcp`: bundles the MCP server (`mcp/`, [mcp/README.md](mcp/README.md)) to `mcp/dist/modeler-mcp.mjs`. Claude runs `mcp/run.mjs`, which rebuilds when sources changed; a running server needs a restart (`/mcp` → Reconnect) to load new code. MCP tests: `tests/mcp.test.ts`; the smoke test also drives the built bundle.
 
 ## Conventions (details in docs/development.md)
 - **Units:** world is **Z-up, millimetres**; rotations are Euler XYZ in degrees. Store clean numbers (`cleanNumber` / `cleanVec`).
 - **Model changes:** UI code goes through the API; only interactive tools mutate `ModelDocument` directly inside a transaction. One user action or AI turn = one undo step.
+- **Annotations** (notes, dimensions, ADR 0015): `doc.annotations`, anchors `{ point }` or `{ entity, at }` (fractions of the part's local box), helpers in `src/model/annotations.ts`, drawn by `src/viewport/AnnotationLayer.ts`. Not geometry.
 - **Reference drawings** (imported DXF plans, ADR 0014): `doc.references` + `doc.geometryOf(id)`, helpers in `src/model/references.ts`. They are never entities: tools, CSG, cut lists and exports must keep ignoring them.
 - **Groups:** flat membership (`groupId` / `parentId`, no transforms), helpers in `src/model/groups.ts`. Tools pick whole units via `Tool.unitOf`.
 - **Shortcuts:** never hard-code them. Add commands to `src/commands.ts` and handle them in `App.runCommand`. Reserved keys are enforced by `reservedReason` in `keymap.ts`.

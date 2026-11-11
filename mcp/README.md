@@ -15,22 +15,22 @@ File paths are relative to the server's **working folder** (`--root`, default: t
 
 ## Build
 
+You don't need to build by hand: `mcp/run.mjs` (what Claude runs) rebuilds the bundle by itself when the code changed, then starts it. To build explicitly:
+
 ```bash
 npm install
-npm run build:mcp      # → mcp/dist/modeler-mcp.mjs (one self-contained file)
+npm run build:mcp      # → mcp/dist/modeler-mcp.mjs + manifold.wasm (the geometry engine; keep them together)
 ```
-
-Rebuild after changing `src/api`, `src/model` or `mcp/src`.
 
 ## Set up Claude Code
 
 From the repo folder:
 
 ```bash
-claude mcp add modeler -- node "$PWD/mcp/dist/modeler-mcp.mjs" --root "$PWD/projects"
+claude mcp add -s user modeler -- node "$PWD/mcp/run.mjs" --root "$HOME/Models"
 ```
 
-Use any folder you like for `--root` (it must exist). Then `npm run dev`, open http://localhost:5173, click **Connect AI** in the top bar, and ask Claude e.g. *"build a bookcase with 4 shelves in the open modeler"*.
+`-s user` makes it available in every project. Use any folder you like for `--root` (it must exist). Then `npm run dev`, open http://localhost:5173, click **Connect AI** in the top bar, and ask Claude e.g. *"build a bookcase with 4 shelves in the open modeler"*.
 
 Headless, without the app: *"make a 60×40×20 mm box with four M3 holes in the corners and export box.stl"*.
 
@@ -45,13 +45,36 @@ Add this to `claude_desktop_config.json` (Settings → Developer → Edit Config
   "mcpServers": {
     "modeler": {
       "command": "node",
-      "args": ["/path/to/modeler/mcp/dist/modeler-mcp.mjs", "--root", "/path/to/your/models"]
+      "args": ["/path/to/modeler/mcp/run.mjs", "--root", "/path/to/your/models"]
     }
   }
 }
 ```
 
 Always pass `--root` here, because Claude Desktop starts servers from an arbitrary folder.
+
+## Managing the server
+
+Claude starts the server itself, **once per session**, and stops it when the session ends. You never run it in a terminal yourself.
+
+| I want to… | Claude Code | Claude Desktop |
+|---|---|---|
+| **Use the latest tools after an update** | `/mcp` → *modeler* → **Reconnect** (or start a new session) | Quit and reopen the app |
+| See whether it runs, and its tools | `/mcp`, or `claude mcp list` | Settings → Developer |
+| Stop it for now | `/mcp` → *modeler* → **Disable** (Enable brings it back) | Remove it from the config and restart |
+| Remove it for good | `claude mcp remove modeler -s user` | Remove it from `claude_desktop_config.json` |
+
+- **Why a restart is needed:** a running server keeps the code it started with. Rebuilding the file doesn't change a process that's already running. Restarting through `run.mjs` rebuilds if the code changed and starts fresh, so **Reconnect is the only step**.
+- **Claude can tell when it's out of date:** `connection_status` reports when the running server was built, plus `update_available` when newer modeler code is on disk.
+- **Two sessions at once:** both get a server, but only the first owns the live bridge to the app (port 47830). The other works headless and says so in `connection_status`. Close the extra session, or Reconnect in the one you want live.
+- **Stray process** (rare, e.g. after a crash): `pgrep -fl modeler-mcp` lists them; `kill <pid>` stops one. Claude restarts the server on its next use.
+
+**Upgrading from the first setup:** older instructions registered `mcp/dist/modeler-mcp.mjs` directly. That still works, but needs `npm run build:mcp` after every update. Switch to the launcher once:
+
+```bash
+claude mcp remove modeler -s user
+claude mcp add -s user modeler -- node /Users/you/dev/AI/modeler/mcp/run.mjs --root /Users/you/Models
+```
 
 ## Options
 

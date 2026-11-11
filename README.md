@@ -37,4 +37,4 @@ npm run build:mcp  # bundle the MCP server (mcp/dist/modeler-mcp.mjs)
 | [Roadmap](docs/roadmap.md) | what's next |
 | [Decisions (ADRs)](docs/adr/README.md) | why things are the way they are |
 
-Built with Vite, TypeScript and Three.js (no UI framework); CSG by [three-bvh-csg](https://github.com/gkjohnson/three-bvh-csg).
+Built with Vite, TypeScript and Three.js (no UI framework); geometry (holes, booleans) by [Manifold](https://github.com/elalish/manifold), with [three-bvh-csg](https://github.com/gkjohnson/three-bvh-csg) as a fallback.

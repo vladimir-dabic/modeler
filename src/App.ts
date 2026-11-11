@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { ModelerApi, type ApiResult } from './api';
 import { BridgeClient, type BridgeStatus } from './bridge/BridgeClient';
+import { activeCsgEngine, type CsgEngine } from './model/csg';
+import type { ExplodeAxis } from './model/explode';
 import { cutListToCsv, buildCutList } from './model/cutlist';
 import { ModelDocument } from './model/Document';
 import {
@@ -29,34 +31,40 @@ import {
   type WorkspaceId,
 } from './model/workspaces';
 import { formatLength, parseLength } from './model/units';
+import { DimensionTool, TextTool } from './tools/AnnotationTools';
 import { BoxTool, CylinderTool, LineTool } from './tools/CreateTools';
 import { EraseTool, OrbitTool, PanTool, TapeTool } from './tools/MiscTools';
 import { MoveTool } from './tools/MoveTool';
 import { PushPullTool } from './tools/PushPullTool';
 import { RotateTool } from './tools/RotateTool';
 import { SelectTool } from './tools/SelectTool';
+import { SphereTool } from './tools/SphereTool';
 import type { Tool, ToolContext, ToolEvent, ToolId } from './tools/Tool';
 import { COMMANDS } from './commands';
 import { comboFromEvent, holdKeyLabel, Keymap, MEASUREMENT_CHARS, type HoldAction } from './keymap';
 import { h, isTextInput } from './ui/dom';
 import { icon } from './ui/icons';
+import { ProjectFiles, type OpenedFile, type FileHandle } from './ui/ProjectFiles';
 import { ContextMenu, type MenuItem } from './ui/ContextMenu';
 import { ShortcutsDialog } from './ui/ShortcutsDialog';
 import { Sidebar } from './ui/Sidebar';
 import { Snapper } from './viewport/Snapper';
 import { Viewport, type ViewName } from './viewport/Viewport';
 
-const TOOLBAR: (ToolId | '|')[] = ['select', '|', 'box', 'cylinder', 'line', '|', 'pushpull', 'move', 'rotate', '|', 'tape', 'erase', '|', 'orbit', 'pan'];
+const TOOLBAR: (ToolId | '|')[] = ['select', '|', 'box', 'cylinder', 'sphere', 'line', '|', 'pushpull', 'move', 'rotate', '|', 'tape', 'dimension', 'text', 'erase', '|', 'orbit', 'pan'];
 
 const TOOL_NAMES: Record<ToolId, string> = {
   select: 'Select',
   box: 'Box',
-  cylinder: 'Cylinder',
+  cylinder: 'Cylinder / cone',
+  sphere: 'Sphere',
   line: 'Line / Shape',
   pushpull: 'Push/Pull',
   move: 'Move / Copy',
   rotate: 'Rotate',
   tape: 'Tape Measure',
+  dimension: 'Dimension',
+  text: 'Text / note',
   erase: 'Eraser',
   orbit: 'Orbit',
   pan: 'Pan',
@@ -110,9 +118,17 @@ export class App {
     ortho: HTMLButtonElement;
     xray: HTMLButtonElement;
     cuts: HTMLButtonElement;
+    explode: HTMLButtonElement;
+    explodeControls: HTMLElement;
+    explodeSlider: HTMLInputElement;
+    explodeAxis: HTMLSelectElement;
     ai: HTMLButtonElement;
+    docName: HTMLElement;
   };
-  private fileName = 'model';
+  /** The project file being edited (ADR 0016). */
+  readonly files = new ProjectFiles();
+  /** Changed since the last save or open. */
+  private dirty = false;
   private defaultColor = '#d4dae3';
   private autosaveTimer = 0;
   private warnedAutosave = false;
@@ -157,6 +173,21 @@ export class App {
     const ortho = textBtn('Persp', 'Toggle perspective / orthographic (parallel) projection', 'view.projection');
     const xray = textBtn('X-ray', 'See through solids', 'view.xray');
     const cuts = textBtn('Cuts', 'Show holes cut into solids (turn off if the scene gets slow)', 'view.cuts');
+    const explode = textBtn('Explode', 'Pull the model apart to see how it fits together (view only: nothing moves in the model)', 'view.explode');
+    const explodeSlider = h('input', { type: 'range', min: '5', max: '100', step: '1', value: '60', class: 'explode-slider', title: 'How far apart', 'aria-label': 'Explode amount' });
+    explodeSlider.addEventListener('input', () => this.setExplode(Number(explodeSlider.value) / 100));
+    const explodeAxis = h('select', { class: 'select tiny', title: 'Direction', 'aria-label': 'Explode direction' },
+      ...[['', 'All'], ['x', 'X'], ['y', 'Y'], ['z', 'Z']].map(([v, l]) => h('option', { value: v }, l)),
+    );
+    explodeAxis.addEventListener('change', () => this.setExplode(this.viewport.explode.factor, (explodeAxis.value || null) as ExplodeAxis | null));
+    // Floats over the viewport while exploded (the top bar has no room for a slider).
+    const explodeControls = h('div', { class: 'explode-panel', hidden: true },
+      h('span', { class: 'muted', title: 'Look only: nothing in the model moves. Assemble to edit.' }, 'Exploded view · look only'),
+      explodeSlider,
+      explodeAxis,
+      h('button', { class: 'icon-btn', title: 'Assemble again', 'aria-label': 'Assemble again', onclick: () => this.setExplode(0) }, '×'),
+    );
+    vpEl.append(explodeControls);
     const ai = btn('ai', 'Let Claude edit this model through the modeler MCP server', 'ai.connect', 'Connect AI');
     ai.classList.add('ai-btn');
 
@@ -169,12 +200,15 @@ export class App {
       ['back', 'Back'],
     ];
 
+    const docName = h('span', { class: 'doc-name', title: 'The project file you are editing' });
+    const recentBtn = h('button', { class: 'tb-btn caret-btn', 'aria-label': 'Open recent', title: 'Open recent', onclick: () => void this.showRecent(recentBtn) }, '▾');
     const topbar = h('header', { class: 'topbar' },
-      h('div', { class: 'brand' }, h('span', { class: 'brand-mark', html: icon('box', 18) }), 'Modeler'),
+      h('div', { class: 'brand' }, h('span', { class: 'brand-mark', html: icon('box', 18) }), 'Modeler', docName),
       this.workspaceSwitcher(),
       h('div', { class: 'tb-group' },
         btn('new', 'New model', 'file.new'),
         btn('open', 'Open project…', 'file.open'),
+        recentBtn,
         btn('drawing', 'Import a DXF drawing (e.g. a floor plan) to build on and snap to', 'file.importDxf'),
         btn('save', 'Save project', 'file.save'),
         btn('export', 'Export STL for 3D printing (selection, or everything)', 'file.exportStl', 'STL'),
@@ -184,7 +218,7 @@ export class App {
         ...views.map(([v, label]) => textBtn(label, `${label} view`, `view.${v}`)),
         btn('extents', 'Zoom extents', 'view.extents'),
       ),
-      h('div', { class: 'tb-group' }, ortho, xray, cuts),
+      h('div', { class: 'tb-group' }, ortho, xray, cuts, explode),
       h('div', { class: 'tb-spacer' }),
       h('div', { class: 'tb-group settings' },
         this.withTitle(h('label', { class: 'tb-field' }, snap, h('span', {}, 'Snap')), 'Snap to grid / steps', 'view.snap'),
@@ -202,20 +236,26 @@ export class App {
     this.shortcuts = new ShortcutsDialog(this.keymap);
     root.append(topbar, toolbar, vpEl, sidebarEl, statusbar, toast, this.shortcuts.el);
 
-    this.els = { hint, vcbLabel, vcb, toast, empty, undo, redo, units, snap, snapStep, snapList, ortho, xray, cuts, groupBadge, ai };
+    this.els = { hint, vcbLabel, vcb, toast, empty, undo, redo, units, snap, snapStep, snapList, ortho, xray, cuts, groupBadge, ai, docName, explode, explodeControls, explodeSlider, explodeAxis };
 
     // ---- core ----
     this.viewport = new Viewport(vpEl, this.doc);
     this.viewport.showCuts = this.settings.showCuts;
     this.snapper = new Snapper(this.viewport, this.doc, this.settings);
     this.api = new ModelerApi(this.doc, {
-      renderViews: (views, size) => this.viewport.renderViewImages(views, size),
+      renderViews: (views, size, opts) => this.viewport.renderViewImages(views, size, opts),
+      setExplode: (factor, axis) => this.setExplode(factor, axis),
     });
     this.bridge = new BridgeClient(this.api, {
       port: Number(new URLSearchParams(location.search).get('aiPort')) || undefined,
       onStatus: (status, why) => this.showAiStatus(status, why),
-      beforeRequest: () => {
+      beforeRequest: (operation) => {
         if (this.doc.inTransaction) this.active.cancel();
+        // Claude's edits land on the assembled model, where the user can see them.
+        if (this.viewport.exploded && (operation === null || this.changesModel(operation))) {
+          this.setExplode(0);
+          this.toast('Assembled again for Claude’s change');
+        }
       },
       onModelChange: (label) => this.toast(label),
     });
@@ -231,16 +271,20 @@ export class App {
       setTool: (id) => this.setTool(id),
       defaultColor: () => this.defaultColor,
       workspace: () => this.workspace,
+      call: (name, input, label) => this.uiCall(name, input, label),
     };
     this.tools = {
       select: new SelectTool(ctx),
       box: new BoxTool(ctx),
       cylinder: new CylinderTool(ctx),
+      sphere: new SphereTool(ctx),
       line: new LineTool(ctx),
       pushpull: new PushPullTool(ctx),
       move: new MoveTool(ctx),
       rotate: new RotateTool(ctx),
       tape: new TapeTool(ctx),
+      dimension: new DimensionTool(ctx),
+      text: new TextTool(ctx),
       erase: new EraseTool(ctx),
       orbit: new OrbitTool(ctx),
       pan: new PanTool(ctx),
@@ -285,8 +329,11 @@ export class App {
     this.doc.onChange((ev) => {
       this.viewport.sync();
       this.updatePrintChecks();
+      if (ev.committed) {
+        this.dirty = true;
+        this.scheduleAutosave();
+      }
       this.updateChrome();
-      if (ev.committed) this.scheduleAutosave();
     });
     this.doc.onSelectionChange(() => {
       this.viewport.updateStyles();
@@ -310,10 +357,14 @@ export class App {
         if (!this.doc.entities.length) this.viewport.zoomExtents();
       } else {
         this.els.units.value = this.doc.units;
+        this.viewport.annotations.sync(); // dimension values are shown in display units
+        this.viewport.requestRender();
         this.refreshSnapList();
         this.showSnapStep();
         this.sidebar.render(true);
       }
+      this.dirty = true;
+      this.updateChrome();
       this.autosave();
     });
 
@@ -336,7 +387,12 @@ export class App {
 
   private restore() {
     const saved = loadAutosave();
-    if (saved) this.doc.load(saved, true);
+    if (saved) {
+      this.doc.load(saved, true);
+      // Reconnect to the file the autosaved model came from, so ⌘S saves back to it.
+      void this.files.restoreCurrent().then(() => this.updateChrome());
+    }
+    this.dirty = false;
     this.applyWorkspace();
     this.viewport.sync();
     this.viewport.setView('iso', false);
@@ -404,7 +460,28 @@ export class App {
    * Run an API operation for the UI. Errors become a toast with the API's hint, so the
    * user sees the same explanation an AI client would get.
    */
+  /** The geometry engine cutting holes right now (ADR 0017); for debugging and the smoke test. */
+  geometryEngine(): CsgEngine {
+    return activeCsgEngine();
+  }
+
+  /** Write and history operations change the model; the exploded view is look-only. */
+  private changesModel(operation: string): boolean {
+    const kind = this.api.operations().find((op) => op.name === operation)?.kind;
+    return kind === 'write' || kind === 'history';
+  }
+
+  /** In the exploded view, edits are refused with this message. */
+  private refuseWhileExploded(): boolean {
+    if (!this.viewport.exploded) return false;
+    this.toast(`Exploded view is look-only. Assemble it to edit (× in the panel, or ${this.keymap.label('view.explode') || 'Explode'}).`);
+    return true;
+  }
+
   uiCall(name: string, input: unknown, label?: string): ApiResult {
+    if (this.changesModel(name) && this.refuseWhileExploded()) {
+      return { ok: false, error: { code: 'unsupported', message: 'The exploded view is look-only' } };
+    }
     const result = this.api.call(name, input, { source: 'ui', label });
     if (!result.ok) this.toast(result.error.hint ? `${result.error.message} — ${result.error.hint}` : result.error.message);
     return result;
@@ -440,15 +517,19 @@ export class App {
   }
 
   private updateChrome() {
-    this.els.undo.disabled = !this.doc.canUndo;
-    this.els.redo.disabled = !this.doc.canRedo;
+    this.els.undo.disabled = this.viewport.exploded || !this.doc.canUndo;
+    this.els.redo.disabled = this.viewport.exploded || !this.doc.canRedo;
     // The start card has buttons; only show it while selecting, so it never eats a drawing click.
     this.els.empty.classList.toggle('visible', this.doc.entities.length === 0 && !this.doc.inTransaction && this.active?.id === 'select');
     this.els.ortho.textContent = this.viewport.isOrtho ? 'Ortho' : 'Persp';
     this.els.ortho.classList.toggle('active', this.viewport.isOrtho);
     this.els.xray.classList.toggle('active', this.viewport.xray);
     this.els.cuts.classList.toggle('active', this.viewport.showCuts);
-    document.title = `${this.fileName} — Modeler`;
+    const name = this.files.name;
+    document.title = `${this.dirty ? '• ' : ''}${name} — Modeler`;
+    this.els.docName.textContent = name;
+    this.els.docName.classList.toggle('dirty', this.dirty);
+    this.els.docName.title = this.dirty ? `${this.files.fileName}: unsaved changes (${this.keymap.label('file.save') || 'Save'})` : this.files.fileName;
   }
 
   private showSnapStep() {
@@ -485,6 +566,11 @@ export class App {
   // ---- tools ----------------------------------------------------------------
 
   setTool(id: ToolId) {
+    // The exploded view is for looking: editing tools work on the assembled model.
+    if (this.viewport?.exploded && !['select', 'orbit', 'pan'].includes(id)) {
+      this.setExplode(0);
+      this.toast('Assembled again for editing');
+    }
     if (this.active) this.active.deactivate();
     this.active = this.tools[id];
     this.active.activate();
@@ -619,10 +705,12 @@ export class App {
     const selected = () => [...this.doc.selection];
     const actions: Record<string, () => void> = {
       'edit.undo': () => {
+        if (this.refuseWhileExploded()) return;
         this.doc.undo();
         this.active.cancel();
       },
       'edit.redo': () => {
+        if (this.refuseWhileExploded()) return;
         this.doc.redo();
         this.active.cancel();
       },
@@ -655,6 +743,12 @@ export class App {
       'view.projection': () => this.toggleOrtho(),
       'view.xray': () => this.toggleXray(),
       'view.cuts': () => this.toggleCuts(),
+      'view.explode': () => this.setExplode(this.viewport.exploded ? 0 : Number(this.els.explodeSlider.value) / 100),
+      'view.annotations': () => {
+        this.viewport.annotations.visible = !this.viewport.annotations.visible;
+        this.viewport.requestRender();
+        this.toast(`Notes and dimensions ${this.viewport.annotations.visible ? 'shown' : 'hidden'}`);
+      },
       'view.snap': () => {
         this.settings.snapEnabled = !this.settings.snapEnabled;
         this.els.snap.checked = this.settings.snapEnabled;
@@ -663,12 +757,14 @@ export class App {
       },
       'file.new': () => this.newModel(),
       'file.open': () => void this.open(),
-      'file.save': () => this.save(),
+      'file.save': () => void this.save(),
+      'file.saveAs': () => void this.save(true),
       'file.exportStl': () => this.exportStl(),
       'file.importDxf': () => void this.importDxf(),
       'file.exportCutList': () => this.exportCutList(),
       'help.shortcuts': () => this.shortcuts.toggle(),
       'ai.connect': () => (this.bridge.status === 'off' ? this.bridge.start() : this.bridge.stop('AI disconnected')),
+      'print.split': () => this.splitForPrint(),
       'print.placeOnPlate': () => {
         const sel = this.doc.selected();
         this.placeOnPlate((sel.length ? sel : this.doc.entities).map((e) => e.id));
@@ -752,7 +848,7 @@ export class App {
         // Cancel the operation first; then clear the selection; then leave an open group.
         if (this.contextMenu.isOpen) this.contextMenu.close();
         else if (this.active.busy) this.active.cancel();
-        else if (this.doc.selection.size) this.doc.clearSelection();
+        else if (this.doc.selection.size || this.doc.annotationSelection.size) this.doc.clearSelection();
         else this.closeGroup();
         this.active.cancel();
         e.preventDefault();
@@ -833,7 +929,11 @@ export class App {
       e.preventDefault();
       const file = e.dataTransfer?.files?.[0];
       if (file && /\.(dxf|dwg)$/i.test(file.name)) void this.importDxf(file);
-      else if (file) void this.openFile(file);
+      else if (file) {
+        // The handle must be requested synchronously, inside the drop event.
+        const item = e.dataTransfer?.items?.[0] as (DataTransferItem & { getAsFileSystemHandle?(): Promise<FileHandle | null> }) | undefined;
+        void this.openFile(file, item?.getAsFileSystemHandle?.() ?? Promise.resolve(null));
+      }
     });
   }
 
@@ -881,31 +981,95 @@ export class App {
 
   private newModel() {
     this.active.cancel();
+    this.setExplode(0);
     if (!this.doc.entities.length) return;
     this.doc.load({ format: 'modeler', version: 1, units: this.doc.units, entities: [] }, false);
-    this.fileName = 'model';
+    this.files.reset();
+    this.dirty = false;
     this.updateChrome();
     this.toast('New model — Undo (⌘/Ctrl+Z) brings the old one back');
   }
 
   private async open() {
-    const file = await pickFile('.json,application/json');
-    if (file) await this.openFile(file);
+    try {
+      const opened = await this.files.open();
+      if (opened) await this.loadOpened(opened);
+    } catch (err) {
+      this.toast(`Couldn’t open the file: ${(err as Error).message}`);
+    }
   }
 
-  private async openFile(file: File) {
+  /** A dropped file; with its handle (Chrome/Edge) Save writes back to it. */
+  private async openFile(file: File, handle: Promise<FileHandle | null> = Promise.resolve(null)) {
+    await this.loadOpened({ name: file.name, text: await file.text(), handle: await handle.catch(() => null) });
+  }
+
+  private async loadOpened(opened: OpenedFile) {
+    let parsed;
     try {
-      const parsed = parseDocumentFile(await file.text());
-      this.active.cancel();
-      this.doc.load(parsed, false);
-      this.applyWorkspace();
-      this.fileName = file.name.replace(/(\.modeler)?\.json$/i, '') || 'model';
-      this.viewport.zoomExtents();
-      this.updateChrome();
-      this.toast(`Opened ${file.name} (${parsed.entities.length} objects)`);
+      parsed = parseDocumentFile(opened.text);
     } catch (err) {
-      this.toast(`Couldn’t open ${file.name}: ${(err as Error).message}`);
+      this.toast(`Couldn’t open ${opened.name}: ${(err as Error).message}`);
+      return;
     }
+    this.active.cancel();
+    this.setExplode(0);
+    // Undoable, so opening over unsaved work can be taken back.
+    this.doc.load(parsed, false, `Open ${opened.name}`);
+    this.applyWorkspace();
+    await this.files.adopt(opened);
+    this.dirty = false;
+    this.viewport.zoomExtents();
+    this.updateChrome();
+    this.toast(`Opened ${opened.name} (${parsed.entities.length} objects)`);
+  }
+
+  /** Recent files (where the browser can reopen them) plus Open…, under the ▾ button. */
+  private async showRecent(anchor: HTMLElement) {
+    const list = this.files.canSaveInPlace ? await this.files.recent() : [];
+    const r = anchor.getBoundingClientRect();
+    const items: MenuItem[] = list.map((f) => ({ label: f.name, run: () => void this.openRecent(f.handle) }));
+    if (list.length) items.push('separator');
+    items.push({ label: 'Open…', shortcut: this.keymap.label('file.open'), run: () => void this.open() });
+    if (list.length) items.push({ label: 'Clear recent files', run: () => void this.files.clearRecent() });
+    else if (!this.files.canSaveInPlace) items.push({ label: 'Recent files need Chrome or Edge', run: () => {} });
+    this.contextMenu.open(r.left, r.bottom + 4, items);
+  }
+
+  private async openRecent(handle: FileHandle) {
+    try {
+      await this.loadOpened(await this.files.read(handle));
+    } catch (err) {
+      this.toast(`Couldn’t open ${handle.name}: ${(err as Error).message}. It may have been moved or deleted.`);
+    }
+  }
+
+  /** Exploded view (display only, no undo step); also driven by the API's explode_view. */
+  setExplode(factor: number, axis: ExplodeAxis | null = this.viewport.explode.axis) {
+    const wasOff = !this.viewport.exploded;
+    this.viewport.setExplode(factor, axis);
+    const { factor: f, axis: a } = this.viewport.explode;
+    if (wasOff && f > 0) this.viewport.zoomExtents(); // the parts spread beyond the old view
+    if (f > 0) this.els.explodeSlider.value = String(Math.round(f * 100));
+    this.els.explodeAxis.value = a ?? '';
+    this.els.explode.classList.toggle('active', f > 0);
+    this.els.explodeControls.hidden = f === 0;
+    this.els.undo.disabled = f > 0 || !this.doc.canUndo;
+    this.els.redo.disabled = f > 0 || !this.doc.canRedo;
+    this.sidebar.setLocked(f > 0);
+  }
+
+  /** Split the selection horizontally through its middle, with pegs (the API does the work). */
+  private splitForPrint() {
+    if (!this.doc.selection.size) return;
+    this.active.cancel();
+    const result = this.uiCall('split_for_print', { target: { selection: true } }, 'Split for print');
+    if (!result.ok) return;
+    const d = result.data as { pieces: string[]; pegs: number; ids: string[]; notes?: string[]; peg?: { diameter: number; hole_diameter: number } };
+    this.doc.setSelection(d.ids);
+    this.viewport.zoomExtents(this.doc.selected());
+    const pegs = d.pegs ? `${d.pegs} peg${d.pegs === 1 ? '' : 's'} Ø${d.peg!.diameter} (holes Ø${d.peg!.hole_diameter})` : 'no pegs';
+    this.toast(`Split into ${d.pieces.join(' and ')}, ${pegs}.${d.notes ? ` ${d.notes.join(' ')}` : ''}`);
   }
 
   /** Import a DXF as a reference drawing (ADR 0014), then show it. */
@@ -913,6 +1077,7 @@ export class App {
     file ??= await pickFile('.dxf');
     if (!file) return;
     this.active.cancel();
+    this.setExplode(0);
     const result = await this.api.callAsync('import_dxf', { text: await file.text(), name: file.name.replace(/\.(dxf|dwg)$/i, '') }, { source: 'ui' });
     if (!result.ok) {
       this.toast(result.error.hint ? `${result.error.message} — ${result.error.hint}` : result.error.message);
@@ -926,31 +1091,41 @@ export class App {
     this.toast(d.hint ?? `Imported ${d.name}: ${size}.${assumed} Change units or layers under Objects.`);
   }
 
-  private save() {
-    downloadBlob(JSON.stringify(this.doc.toFile(), null, 1), `${this.fileName}.modeler.json`, 'application/json');
-    this.toast('Project downloaded');
+  /** Save back to the current file (Chrome/Edge), or ask for one; elsewhere download a copy. */
+  private async save(saveAs = false) {
+    this.active.cancel();
+    try {
+      const result = await this.files.save(JSON.stringify(this.doc.toFile(), null, 1), saveAs);
+      if (result === 'cancelled') return;
+      this.dirty = false;
+      this.updateChrome();
+      this.toast(result === 'saved' ? `Saved ${this.files.fileName}` : `Downloaded ${this.files.fileName} (this browser can’t save back to a file; Chrome and Edge can)`);
+    } catch (err) {
+      this.toast(`Couldn’t save: ${(err as Error).message}`);
+    }
   }
 
   private exportStl() {
     const selected = this.doc.selected();
     const targets = selected.length ? selected : this.doc.entities;
-    const buffer = exportStl(targets, this.doc.entities);
+    const buffer = exportStl(targets, this.doc.entities, this.doc.groups);
     if (!buffer) {
       this.toast('Nothing to export — add a solid first');
       return;
     }
-    downloadBlob(buffer, `${this.fileName}${selected.length ? '-selection' : ''}.stl`, 'model/stl');
+    downloadBlob(buffer, `${this.files.name}${selected.length ? '-selection' : ''}.stl`, 'model/stl');
     const solids = targets.filter((e) => !e.hole && e.visible).length;
     this.toast(`Exported ${solids} solid${solids === 1 ? '' : 's'} to STL (mm, holes applied)`);
   }
 
   private exportCutList() {
     const csv = cutListToCsv(buildCutList(this.doc.entities), this.doc.units);
-    downloadBlob(csv, `${this.fileName}-cutlist.csv`, 'text/csv');
+    downloadBlob(csv, `${this.files.name}-cutlist.csv`, 'text/csv');
   }
 
   private deleteSelection() {
-    if (this.doc.selection.size) this.uiCall('delete_entities', { target: { selection: true } }, 'Delete');
+    if (this.doc.annotationSelection.size) this.uiCall('delete_annotations', { ids: [...this.doc.annotationSelection] }, 'Delete annotation');
+    else if (this.doc.selection.size) this.uiCall('delete_entities', { target: { selection: true } }, 'Delete');
   }
 
   /** ⌘D: one copy beside the original (whole groups are copied as groups); copies get selected. */
@@ -1020,6 +1195,7 @@ export class App {
         'separator',
         item('edit.toggleHole', allHoles ? 'Make solid' : 'Make hole'),
         this.workspace.printPlate ? item('print.placeOnPlate', 'Place on plate') : item('edit.placeOnGround', 'Place on ground'),
+        ...(this.workspace.printPlate && !allHoles ? [item('print.split', 'Split for printing (through the middle)')] : []),
         'separator',
         item('view.zoomSelection', 'Zoom to selection'),
         item('edit.hide', 'Hide'),

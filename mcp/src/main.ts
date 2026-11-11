@@ -1,6 +1,9 @@
 /// <reference types="node" />
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { parse, resolve } from 'node:path';
+import { readdirSync, statSync } from 'node:fs';
+import { dirname, join, parse, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { initManifold } from '../../src/model/manifold';
 import { parseArgs } from 'node:util';
 import { DEFAULT_BRIDGE_PORT } from '../../src/bridge/protocol';
 import { BridgeServer, DEFAULT_ORIGINS } from './bridge';
@@ -30,6 +33,9 @@ if (parse(root).root === root) {
 const port = Number(values.port ?? process.env.MODELER_BRIDGE_PORT ?? DEFAULT_BRIDGE_PORT);
 const origins = values.origin ?? (process.env.MODELER_ORIGINS ? process.env.MODELER_ORIGINS.split(',').map((s) => s.trim()) : DEFAULT_ORIGINS);
 
+// The geometry engine (ADR 0017); its WebAssembly is copied next to this bundle.
+const engineOk = await initManifold(join(dirname(fileURLToPath(import.meta.url)), 'manifold.wasm'));
+if (!engineOk) log('Manifold engine failed to load; using the fallback engine');
 const files = await NodeFileHost.create(root);
 let bridge: BridgeServer | undefined;
 let bridgeStatus = 'off (--no-bridge)';
@@ -46,7 +52,24 @@ if (!values['no-bridge']) {
 }
 log(`working folder ${root}; bridge ${bridgeStatus}`);
 
-const { server } = createModelerServer({ files, bridge, bridgeStatus });
+// Is the code on disk newer than this running server? (Then a restart picks it up.)
+const self = fileURLToPath(import.meta.url);
+const repo = join(dirname(self), '..', '..');
+const builtAt = statSync(self).mtimeMs;
+const newest = (path: string): number => {
+  const info = statSync(path, { throwIfNoEntry: false });
+  if (!info) return 0;
+  return info.isDirectory() ? Math.max(0, ...readdirSync(path).map((n) => newest(join(path, n)))) : info.mtimeMs;
+};
+const buildInfo = () => {
+  const changed = Math.max(...['src/api', 'src/model', 'src/bridge', 'mcp/src'].map((p) => newest(join(repo, p))));
+  return {
+    built: new Date(builtAt).toISOString(),
+    ...(changed > builtAt ? { update_available: 'The modeler was updated after this server started. Restart the MCP server to load the new tools.' } : {}),
+  };
+};
+
+const { server } = createModelerServer({ files, bridge, bridgeStatus, buildInfo });
 const shutdown = async () => {
   await bridge?.close();
   process.exit(0);

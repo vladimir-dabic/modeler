@@ -17,6 +17,10 @@ All lengths are millimetres, angles degrees, world Z-up. Write operations return
 | [`add_box`](#add_box) | write (one undo step) |
 | [`add_cylinder`](#add_cylinder) | write (one undo step) |
 | [`add_shape`](#add_shape) | write (one undo step) |
+| [`add_sphere`](#add_sphere) | write (one undo step) |
+| [`add_revolve`](#add_revolve) | write (one undo step) |
+| [`add_tube`](#add_tube) | write (one undo step) |
+| [`split_for_print`](#split_for_print) | write (one undo step) |
 | [`update_entity`](#update_entity) | write (one undo step) |
 | [`delete_entities`](#delete_entities) | write (one undo step) |
 | [`set_hole`](#set_hole) | write (one undo step) |
@@ -40,9 +44,15 @@ All lengths are millimetres, angles degrees, world Z-up. Write operations return
 | [`undo`](#undo) | undo / redo |
 | [`redo`](#redo) | undo / redo |
 | [`render_views`](#render_views) | needs a host capability (async) |
+| [`explode_view`](#explode_view) | needs a host capability (async) |
 | [`open_file`](#open_file) | needs a host capability (async) |
 | [`save_file`](#save_file) | needs a host capability (async) |
 | [`export_stl`](#export_stl) | needs a host capability (async) |
+| [`add_note`](#add_note) | write (one undo step) |
+| [`add_dimension`](#add_dimension) | write (one undo step) |
+| [`dimension_parts`](#dimension_parts) | write (one undo step) |
+| [`update_annotation`](#update_annotation) | write (one undo step) |
+| [`delete_annotations`](#delete_annotations) | write (one undo step) |
 | [`import_dxf`](#import_dxf) | needs a host capability (async) |
 | [`get_reference`](#get_reference) | read (no change) |
 | [`update_reference`](#update_reference) | write (one undo step) |
@@ -53,7 +63,7 @@ All lengths are millimetres, angles degrees, world Z-up. Write operations return
 
 *read (no change)*
 
-Overview of the model: workspace, printer, overall bounds, the parts and any reference drawings (imported plans to build on; not parts). detail "outline" lists each top-level group as one line (best first call on big models), "compact" (default) one line per part, "full" complete JSON. Lines read: id "name" shape size at x,y,z [hole] in "group".
+Overview of the model: workspace, printer, overall bounds, the parts, annotations (notes, dimensions) and any reference drawings (imported plans to build on; not parts). detail "outline" lists each top-level group as one line (best first call on big models), "compact" (default) one line per part, "full" complete JSON. Lines read: id "name" shape size at x,y,z [hole] in "group".
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -118,7 +128,7 @@ No input.
 
 *write (one undo step)*
 
-Add a box (board, block, panel). position is its min corner (default origin); size is [x, y, z] in mm. Example: { "name": "Side", "position": [0, 0, 18], "size": [18, 300, 700] }.
+Add a box (board, block, panel). position is its min corner (default origin); size is [x, y, z] in mm. edge_radius rounds every edge and corner (printed enclosures, soft blocks). Example: { "name": "Side", "position": [0, 0, 18], "size": [18, 300, 700] }.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -129,12 +139,13 @@ Add a box (board, block, panel). position is its min corner (default origin); si
 | `hole` | boolean |  | true = subtract from every solid it overlaps |
 | `group` | string |  | Add into this group (id or name) |
 | `size` | [number, number, number] | yes | [x, y, z] sizes in mm, all > 0 |
+| `edge_radius` | number |  | Round all edges, mm (< half the smallest side) |
 
 ## add_cylinder
 
 *write (one undo step)*
 
-Add a cylinder (rod, dowel, round hole). position is the centre of its base; it extends along axis (default z) by height. Give radius or diameter. For a screw hole: hole: true. Example M3 hole through a 10 mm plate: { "position": [20, 20, -1], "diameter": 3.4, "height": 12, "hole": true }.
+Add a cylinder (rod, dowel, round hole), or a cone/frustum with a different top: radius_top or diameter_top (0 = pointed; larger than the base for a countersink hole). position is the centre of its base; it extends along axis (default z) by height. Give radius or diameter. For a screw hole: hole: true. Example M3 hole through a 10 mm plate: { "position": [20, 20, -1], "diameter": 3.4, "height": 12, "hole": true }.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -147,6 +158,8 @@ Add a cylinder (rod, dowel, round hole). position is the centre of its base; it 
 | `radius` | number |  |  |
 | `diameter` | number |  |  |
 | `height` | number | yes |  |
+| `radius_top` | number |  |  |
+| `diameter_top` | number |  |  |
 | `axis` | "x" \| "y" \| "z" |  |  |
 | `segments` | integer |  | Smoothness; default from workspace |
 
@@ -167,16 +180,90 @@ Add an extruded outline (L-bracket, triangle, custom profile). points are [x, y]
 | `points` | [number, number][] | yes |  |
 | `height` | number | yes |  |
 
+## add_sphere
+
+*write (one undo step)*
+
+Add a sphere or ellipsoid. position is its CENTRE. Give radius or diameter (sphere), or radii [x, y, z] (ellipsoid: egg, head, body). Use with holes for domes and half-spheres.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string |  | Meaningful name (shows in the cut list); default "Box N" etc. |
+| `position` | [number, number, number] |  | [x, y, z] in mm |
+| `rotation` | [number, number, number] |  | Euler XYZ rotation in degrees |
+| `color` | string |  | Default: the workspace colour |
+| `hole` | boolean |  | true = subtract from every solid it overlaps |
+| `group` | string |  | Add into this group (id or name) |
+| `radius` | number |  |  |
+| `diameter` | number |  |  |
+| `radii` | [number, number, number] |  | Ellipsoid radii [x, y, z], mm |
+| `segments` | integer |  | Smoothness (default 48) |
+
+## add_revolve
+
+*write (one undo step)*
+
+Add a solid of revolution (vase, bottle, knob, turned leg, bowl): profile points [radius, z] (radius ≥ 0) outline one side of it; it spins 360° around an axis through position (default z). Points with radius 0 lie on the axis and close it there. Example cup: [[0,0],[40,0],[45,90],[42,90],[37,4],[0,4]].
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string |  | Meaningful name (shows in the cut list); default "Box N" etc. |
+| `position` | [number, number, number] |  | [x, y, z] in mm |
+| `rotation` | [number, number, number] |  | Euler XYZ rotation in degrees |
+| `color` | string |  | Default: the workspace colour |
+| `hole` | boolean |  | true = subtract from every solid it overlaps |
+| `group` | string |  | Add into this group (id or name) |
+| `profile` | [number, number][] | yes | [radius, z] points of a closed outline, mm |
+| `axis` | "x" \| "y" \| "z" |  |  |
+| `segments` | integer |  | Smoothness around the axis (default 64) |
+
+## add_tube
+
+*write (one undo step)*
+
+Add a round tube along a path of world points (tail, neck, handle, cable, pipe, rail): one part instead of many cylinders. smooth (default true) curves through the points; false makes straight segments. Give radius/diameter for a constant tube, or radii (one per point) to taper. Ends are flat.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string |  | Meaningful name (shows in the cut list); default "Box N" etc. |
+| `color` | string |  | Default: the workspace colour |
+| `hole` | boolean |  | true = subtract from every solid it overlaps |
+| `group` | string |  | Add into this group (id or name) |
+| `path` | [number, number, number][] | yes | World points the centre line passes through, mm |
+| `radius` | number |  |  |
+| `diameter` | number |  |  |
+| `radii` | number[] |  | A radius per path point |
+| `smooth` | boolean |  |  |
+| `segments` | integer |  | Smoothness around the tube (default 24) |
+
+## split_for_print
+
+*write (one undo step)*
+
+Cut a part or assembly into two printable pieces along a plane across axis (default z) at a coordinate (default: the middle). The lower piece gets pegs and the upper one matching holes with clearance, so they align and glue. Each piece is a new group; holes that cut the original are copied into each piece; the upper piece moves gap mm away. The original is replaced (one undo brings it back). Default pegs: as many as fit, up to 2.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } | yes | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
+| `axis` | "x" \| "y" \| "z" |  |  |
+| `at` | number |  | Where to cut, mm along axis |
+| `gap` | number |  | How far to move the upper piece apart (default 10) |
+| `pegs` | integer |  | Number of pegs (0 = none) |
+| `peg_diameter` | number |  | Default: 5 mm, smaller for small cut faces |
+| `peg_depth` | number |  | How far a peg goes into each piece (default 1.2 × diameter) |
+| `clearance` | number |  | Extra radius of the peg holes (default 0.2 mm, a sliding fit) |
+| `name` | string |  | Base name of the pieces |
+
 ## update_entity
 
 *write (one undo step)*
 
-Change one part's parameters. Only keys that fit the part apply: size (box); radius or diameter, segments (cylinder); points (shape); height (cylinder, shape). Example: { "id": "k3f9a2", "set": { "size": [18, 300, 650] } }.
+Change one part's parameters. Only keys that fit the part apply: size, edge_radius (box); radius or diameter (cylinder, sphere, tube); radius_top or diameter_top (cylinder → cone); height (cylinder, shape); radii ([x,y,z] for a sphere, one per point for a tube); points (shape); profile (revolve); path (tube, world points), smooth (tube); segments (round kinds). Example: { "id": "k3f9a2", "set": { "size": [18, 300, 650] } }.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `id` | string | yes |  |
-| `set` | { name, position, rotation, size, radius, diameter, height, segments, points, color, hole, visible } | yes |  |
+| `set` | { name, position, rotation, size, edge_radius, radius, diameter, radius_top, diameter_top, height, radii, segments, points, profile, path, smooth, color, hole, visible } | yes |  |
 
 ## delete_entities
 
@@ -192,12 +279,13 @@ Delete the targeted parts (groups left empty disappear).
 
 *write (one undo step)*
 
-Make the targeted parts holes (subtracted from overlapping solids) or solids again.
+Make the targeted parts holes (subtracted from overlapping solids) or solids again. only_own_group: true makes a hole cut only parts in its own group (e.g. a pocket in one part of an assembly that must not cut its neighbours); false: it cuts everything it overlaps (the default).
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } | yes | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
 | `hole` | boolean | yes |  |
+| `only_own_group` | boolean |  |  |
 
 ## set_visible
 
@@ -416,12 +504,25 @@ No input.
 
 *needs a host capability (async)*
 
-Render PNG images of the model from standard views to check shape and alignment visually. Use sparingly: images cost tokens.
+Render PNG images of the model from standard views to check shape and alignment visually. explode (0–1) renders it pulled apart (how parts fit together) without changing the user's view. Use sparingly: images cost tokens.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `views` | "iso" \| "top" \| "front" \| "right" \| "left" \| "back" \| "bottom"[] |  |  |
 | `size` | integer |  |  |
+| `explode` | number |  |  |
+| `explode_axis` | "x" \| "y" \| "z" |  |  |
+
+## explode_view
+
+*needs a host capability (async)*
+
+Show the model pulled apart in the app (an exploded view: how the parts fit together). factor 0 = assembled, 1 = fully apart; axis limits it to one direction (e.g. z lifts parts apart vertically). Top-level groups move as units. View only: the model and undo history are untouched.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `factor` | number | yes |  |
+| `axis` | "x" \| "y" \| "z" |  |  |
 
 ## open_file
 
@@ -453,6 +554,70 @@ Write a binary STL (mm) of the visible solids, with holes cut, for 3D printing. 
 |---|---|---|---|
 | `path` | string | yes | Must end in .stl |
 | `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } |  | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
+
+## add_note
+
+*write (one undo step)*
+
+Add a text note (annotation, not geometry), e.g. "Oak top, 18 mm" or "drill on site". It sits at `at` (a point, or { part, at } to stay attached to a part), with a leader line when label_offset moves the text away.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `text` | string | yes |  |
+| `at` | [number, number, number] \| { part, at } | yes | A world point [x, y, z] (mm), or a point on a part { part, at }. Points on parts follow the part when it moves or is resized. |
+| `label_offset` | [number, number, number] |  | Where the text goes relative to the point, mm (default: on the point, no leader) |
+
+## add_dimension
+
+*write (one undo step)*
+
+Add a dimension between two points (or { part, at } points, which keep it updated when parts move or resize). axis measures along x, y or z only; otherwise the true distance. The line sits offset mm (default ~15% of the length) towards side (default: away from the parts). text overrides the value; "<>" inserts it.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `from` | [number, number, number] \| { part, at } | yes | A world point [x, y, z] (mm), or a point on a part { part, at }. Points on parts follow the part when it moves or is resized. |
+| `to` | [number, number, number] \| { part, at } | yes | A world point [x, y, z] (mm), or a point on a part { part, at }. Points on parts follow the part when it moves or is resized. |
+| `axis` | "x" \| "y" \| "z" |  |  |
+| `offset` | number \| [number, number, number] |  | Distance from the measured points to the dimension line, mm (or an exact offset vector) |
+| `side` | "+x" \| "-x" \| "+y" \| "-y" \| "+z" \| "-z" |  | Which way the dimension line sits from the measured points |
+| `text` | string |  |  |
+
+## dimension_parts
+
+*write (one undo step)*
+
+Add overall dimensions of the targeted parts (e.g. a whole cabinet or group): one per axis (default x, y and z), attached to the outermost parts so they update when the model changes. Width (x) sits above, depth (y) and height (z) to the left.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } | yes | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
+| `axes` | "x" \| "y" \| "z"[] |  |  |
+| `offset` | number |  | Distance from the parts to the dimension lines, mm |
+
+## update_annotation
+
+*write (one undo step)*
+
+Change an annotation: text (a dimension's override; "" restores the measured value), a note's label_offset, or a dimension's offset distance and side.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `id` | string | yes |  |
+| `text` | string |  |  |
+| `label_offset` | [number, number, number] |  | [x, y, z] in mm |
+| `offset` | number |  |  |
+| `side` | "+x" \| "-x" \| "+y" \| "-y" \| "+z" \| "-z" |  | Which way the dimension line sits from the measured points |
+
+## delete_annotations
+
+*write (one undo step)*
+
+Remove annotations by id, or all of them. Parts are not affected.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `ids` | string[] |  |  |
+| `all` | true |  |  |
 
 ## import_dxf
 

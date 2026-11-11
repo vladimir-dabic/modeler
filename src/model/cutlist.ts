@@ -25,9 +25,10 @@ export function buildCutList(entities: Entity[]): CutListRow[] {
     let note = '';
     if (e.kind === 'box') {
       dims = [...e.size];
-    } else if (e.kind === 'cylinder') {
-      dims = [e.radius * 2, e.radius * 2, e.height];
-      note = 'round';
+    } else if (e.kind === 'cylinder' || e.kind === 'sphere' || e.kind === 'revolve' || e.kind === 'tube') {
+      const size = localBounds(e).getSize(new THREE.Vector3());
+      dims = [size.x, size.y, size.z];
+      note = e.kind === 'tube' ? 'tube (bounding box)' : 'round';
     } else {
       const size = localBounds(e).getSize(new THREE.Vector3());
       dims = [size.x, size.y, size.z];

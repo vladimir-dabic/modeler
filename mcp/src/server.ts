@@ -26,7 +26,8 @@ const STATUS_TOOL = {
 const MCP_NOTES = `This MCP server has two modes (see connection_status):
 - live: the user clicked "Connect AI" in the open modeler app. Every call edits that model; the user sees it happen and can undo each call.
 - headless: no app is connected. Calls edit an in-memory model in this server. open_file / save_file / export_stl read and write files in the working folder (paths are relative to it).
-File operations always run in this server, also in live mode (save_file then saves what the app shows).`;
+File operations always run in this server, also in live mode (save_file then saves what the app shows).
+If connection_status reports update_available, the modeler was updated after this server started: tell the user to restart the modeler MCP server (Claude Code: /mcp → modeler → Reconnect; Claude Desktop: quit and reopen) to get the new tools.`;
 
 export interface ModelerServerOptions {
   files: NodeFileHost;
@@ -34,6 +35,8 @@ export interface ModelerServerOptions {
   bridge?: BridgeServer;
   /** Human-readable bridge state for connection_status, e.g. "listening on ws://127.0.0.1:47830". */
   bridgeStatus: string;
+  /** When this server was built, and whether newer code is waiting (checked on each status call). */
+  buildInfo?: () => { built: string; update_available?: string };
 }
 
 function labelFor(name: string, input: unknown): string {
@@ -87,6 +90,8 @@ export function createModelerServer(opts: ModelerServerOptions) {
           working_folder: files.root,
           current_file: files.currentPath ?? null,
           headless_parts: local.doc.entities.length,
+          server_version: SERVER_VERSION,
+          ...(opts.buildInfo?.() ?? {}),
         },
       };
     }

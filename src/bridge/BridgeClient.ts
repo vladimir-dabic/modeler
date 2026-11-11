@@ -20,10 +20,11 @@ export interface BridgeClientOptions {
   createSocket?: (url: string) => SocketLike;
   onStatus?: (status: BridgeStatus, why?: string) => void;
   /**
-   * Called before each request runs. The app cancels a tool operation in progress here,
-   * so an AI change never lands inside the user's open transaction.
+   * Called before each request runs, with the operation name (null for loading a file).
+   * The app cancels a tool operation in progress here, so an AI change never lands inside
+   * the user's open transaction, and reassembles an exploded view before an edit.
    */
-  beforeRequest?: () => void;
+  beforeRequest?: (operation: string | null) => void;
   /** Called after each request that changed the model, with its undo label (for a toast). */
   onModelChange?: (label: string) => void;
 }
@@ -120,7 +121,7 @@ export class BridgeClient {
   private async handle(msg: BridgeRequest): Promise<ApiResult> {
     const { doc } = this.api;
     try {
-      if (msg.type !== 'get_file') this.opts.beforeRequest?.();
+      if (msg.type !== 'get_file') this.opts.beforeRequest?.(msg.type === 'call' ? msg.name : null);
       if (msg.type === 'call') {
         const result = await this.api.callAsync(msg.name, msg.input, { source: 'mcp', label: msg.label });
         if (result.ok && result.changes) this.opts.onModelChange?.(msg.label ?? msg.name);

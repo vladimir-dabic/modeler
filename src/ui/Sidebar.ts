@@ -1,11 +1,14 @@
 import * as THREE from 'three';
-import { buildWorldGeometries } from '../model/csg';
+import { buildWorldGeometries, fuseGeometries } from '../model/csg';
 import { buildCutList } from '../model/cutlist';
 import type { ModelDocument } from '../model/Document';
-import { polygonArea, worldBounds, worldBoundsOf } from '../model/geometry';
+import { localBounds, worldBounds, worldBoundsOf } from '../model/geometry';
+import { footprintMm2 } from '../model/quantities';
+import { tubeLength } from '../model/shapes';
 import { groupChain, groupForSelection, groupMembers } from '../model/groups';
+import { anchoredIds, dimensionGeometry } from '../model/annotations';
 import { DRAWING_UNITS, referenceBounds } from '../model/references';
-import type { Entity, Group, Vec3 } from '../model/types';
+import type { Annotation, Entity, Group, Vec3 } from '../model/types';
 import { formatLength, parseAngle, parseLength, trimNumber } from '../model/units';
 import {
   FILAMENTS,
@@ -53,8 +56,8 @@ const TAB_LABEL: Record<PanelId, string> = {
   quantities: 'Quantities',
 };
 
-const KIND_ICON: Record<Entity['kind'], string> = { box: 'box', cylinder: 'cylinder', extrusion: 'shape' };
-const KIND_NAME: Record<Entity['kind'], string> = { box: 'Box', cylinder: 'Cylinder', extrusion: 'Extruded shape' };
+const KIND_ICON: Record<Entity['kind'], string> = { box: 'box', cylinder: 'cylinder', extrusion: 'shape', sphere: 'sphere', revolve: 'revolve', tube: 'tube' };
+const KIND_NAME: Record<Entity['kind'], string> = { box: 'Box', cylinder: 'Cylinder', extrusion: 'Extruded shape', sphere: 'Sphere', revolve: 'Revolved shape', tube: 'Tube' };
 
 export class Sidebar {
   readonly el: HTMLElement;
@@ -65,8 +68,18 @@ export class Sidebar {
   private tabButtons = new Map<Tab, HTMLButtonElement>();
   private dirty = false;
   /** Mesh volumes (mm³, holes applied) per entity, computed when the model is idle. */
-  private volumeCache: { version: number; byId: Map<string, number> } | null = null;
+  private volumeCache: { version: number; byId: Map<string, number>; total: number } | null = null;
   private volumeTimer = 0;
+  /** Look-only (the exploded view): fields read-only, actions hidden behind a note. */
+  private locked = false;
+
+  setLocked(locked: boolean) {
+    if (locked === this.locked) return;
+    this.locked = locked;
+    this.el.classList.toggle('locked', locked);
+    this.render(true);
+  }
+
   /** Reference drawings whose layer list is open (UI only). */
   private readonly expandedRefs = new Set<string>();
   /** Groups collapsed in the Objects tree (UI only). */
@@ -140,6 +153,9 @@ export class Sidebar {
     }
     const scroll = this.body.scrollTop;
     this.body.replaceChildren();
+    if (this.locked) {
+      this.body.append(h('p', { class: 'lock-note' }, 'Exploded view: look only. Assemble it (× at the top of the view) to edit.'));
+    }
     if (this.tab === 'properties') this.renderProperties();
     else if (this.tab === 'objects') this.renderObjects();
     else if (this.tab === 'print') this.renderPrint();
@@ -155,12 +171,70 @@ export class Sidebar {
   // ---- properties ---------------------------------------------------------
 
   private renderProperties() {
+    if (this.doc.annotationSelection.size) return this.renderAnnotations([...this.doc.annotationSelection].map((id) => this.doc.getAnnotation(id)!).filter(Boolean));
     const sel = this.doc.selected();
     if (!sel.length) return this.renderEmpty();
     const g = groupForSelection(this.doc.selection, this.doc.entities, this.doc.groups);
     if (g && !(sel.length === 1 && this.doc.openGroupId === g.id)) return this.renderGroup(g, sel);
     if (sel.length === 1) return this.renderSingle(sel[0]);
     return this.renderMulti(sel);
+  }
+
+  /** Properties of selected notes / dimensions (ADR 0015). */
+  private renderAnnotations(list: Annotation[]) {
+    const doc = this.doc;
+    const del = h('button', { class: 'btn danger', title: 'Delete (Del)', onclick: () => this.actions.deleteSelection(), html: `${icon('trash', 16)}<span>Delete</span>` });
+    if (list.length !== 1) {
+      this.body.append(this.section(`${list.length} annotations`, h('div', { class: 'prop-actions' }, del)));
+      return;
+    }
+    const a = list[0];
+    const parts = anchoredIds(a).map((id) => doc.get(id)?.name).filter(Boolean);
+    const attached = this.row('Attached to', h('span', { class: parts.length ? '' : 'muted' }, parts.length ? [...new Set(parts)].join(', ') : 'fixed point'));
+    const textArea = (value: string, placeholder: string, commit: (text: string) => void) => {
+      const el = h('textarea', { class: 'field note-field', rows: 3, placeholder, spellcheck: 'false' });
+      el.value = value;
+      el.addEventListener('keydown', (e: KeyboardEvent) => {
+        e.stopPropagation();
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          el.blur();
+        } else if (e.key === 'Escape') {
+          el.value = value;
+          el.blur();
+        }
+      });
+      el.addEventListener('change', () => commit(el.value));
+      return el;
+    };
+    if (a.kind === 'note') {
+      this.body.append(
+        this.section('Text',
+          textArea(a.text, 'Text', (t) => {
+            if (t.trim()) this.call('update_annotation', { id: a.id, text: t }, 'Edit text');
+          }),
+          attached,
+          h('p', { class: 'muted small' }, 'Drag the text in the view to move it; double-click to edit it there.'),
+          h('div', { class: 'prop-actions' }, del),
+        ),
+      );
+      return;
+    }
+    const g = dimensionGeometry(a, (id) => doc.get(id));
+    const offset = Math.hypot(...a.offset);
+    this.body.append(
+      this.section('Dimension',
+        this.row('Measures', h('span', {}, g ? `${formatLength(g.value, this.units)}${a.axis ? ` along ${a.axis.toUpperCase()}` : ''}` : '—')),
+        this.row('Text', this.input(a.text ?? '', (t) => this.call('update_annotation', { id: a.id, text: t }, 'Dimension text'), { title: 'Replaces the value; <> inserts it. Empty = the measured value.' })),
+        this.row('Offset', this.input(formatLength(offset, this.units, false), (t) => {
+          const v = parseLength(t, this.units);
+          return v !== null && v >= 0 && this.call('update_annotation', { id: a.id, offset: v }, 'Dimension offset');
+        }, { suffix: this.units })),
+        attached,
+        h('p', { class: 'muted small' }, 'Updates when the parts it is attached to move or change size. Drag it in the view to move the line.'),
+        h('div', { class: 'prop-actions' }, del),
+      ),
+    );
   }
 
   private renderEmpty() {
@@ -270,10 +344,16 @@ export class Sidebar {
     const allSolid = entities.every((e) => !e.hole);
     const btn = (label: string, active: boolean, hole: boolean, title: string) =>
       h('button', { class: `seg ${active ? 'active' : ''}`, title, onclick: () => this.call('set_hole', { target: { ids }, hole }, hole ? 'Make hole' : 'Make solid') }, label);
-    return h('div', { class: 'segmented' },
+    const toggle = h('div', { class: 'segmented' },
       btn('Solid', allSolid, false, 'A normal solid part'),
       btn('Hole', allHole, true, 'Subtracted from every solid it overlaps (shown red, cut on export)'),
     );
+    // Holes in a group can be limited to cutting that group only.
+    if (!allHole || !entities.every((e) => e.groupId)) return toggle;
+    const scoped = entities.every((e) => e.holeScope === 'group');
+    const box = h('input', { type: 'checkbox', checked: scoped });
+    box.addEventListener('change', () => this.call('set_hole', { target: { ids }, hole: true, only_own_group: box.checked }, box.checked ? 'Hole cuts its group only' : 'Hole cuts everything'));
+    return h('div', {}, toggle, h('label', { class: 'check-row', title: 'On: this hole cuts only parts in its own group, not neighbouring parts it overlaps' }, box, h('span', {}, 'Cuts only its own group')));
   }
 
   private colorPicker(entities: Entity[]): HTMLElement {
@@ -336,14 +416,39 @@ export class Sidebar {
         next[i] = v;
         return set({ size: next }, 'Resize');
       }, 'length', 0.01)));
+      size.push(this.row('Round edges', this.lengthInput(e.edgeRadius ?? 0, (v) => set({ edge_radius: v }, 'Round edges'), 0), 'Radius that rounds every edge and corner; 0 = sharp'));
     } else if (e.kind === 'cylinder') {
       size.push(
-        this.row('Diameter', this.lengthInput(e.radius * 2, (v) => set({ diameter: v }, 'Resize'), 0.01)),
+        this.row(e.radiusTop === undefined ? 'Diameter' : 'Base ⌀', this.lengthInput(e.radius * 2, (v) => set({ diameter: v }, 'Resize'), 0.01)),
+        this.row('Top ⌀', this.lengthInput((e.radiusTop ?? e.radius) * 2, (v) => set({ diameter_top: v }, 'Taper'), 0), 'A different top makes a cone: 0 = pointed. Equal to the base = a cylinder.'),
         this.row('Height', this.lengthInput(e.height, (v) => set({ height: v }, 'Resize'), 0.01)),
         this.row('Segments', this.input(String(e.segments), (t) => {
           const v = parseInt(t, 10);
           return v >= 3 && v <= 256 && set({ segments: v });
         }), 'Smoothness of the round surface (3–256). 64 is plenty for printing.'),
+      );
+    } else if (e.kind === 'sphere') {
+      const round = e.radii[0] === e.radii[1] && e.radii[1] === e.radii[2];
+      size.push(
+        round
+          ? this.row('Diameter', this.lengthInput(e.radii[0] * 2, (v) => set({ diameter: v }, 'Resize'), 0.01))
+          : this.row('Diameters', this.vecInputs(e.radii.map((r) => r * 2) as Vec3, (i, v) => set({ radii: e.radii.map((r, k) => (k === i ? v / 2 : r)) }, 'Resize'), 'length', 0.01)),
+      );
+      if (round) size.push(this.row('Stretch', h('button', { class: 'btn small', onclick: () => set({ radii: [e.radii[0], e.radii[1], e.radii[2] * 1.5] }, 'Make ellipsoid') }, 'Make ellipsoid'), 'Give it different X/Y/Z diameters'));
+    } else if (e.kind === 'revolve') {
+      const b = localBounds(e).getSize(new THREE.Vector3());
+      size.push(
+        this.row('Diameter', h('span', { class: 'muted' }, formatLength(b.x, this.units))),
+        this.row('Height', h('span', { class: 'muted' }, formatLength(b.z, this.units))),
+        this.row('Profile', h('span', { class: 'muted' }, `${e.profile.length} points (edit through the API / AI)`)),
+      );
+    } else if (e.kind === 'tube') {
+      size.push(
+        e.radii
+          ? this.row('Diameter', h('span', { class: 'muted' }, `${formatLength(Math.min(...e.radii) * 2, this.units)} – ${formatLength(Math.max(...e.radii) * 2, this.units)} (tapered)`))
+          : this.row('Diameter', this.lengthInput(e.radius * 2, (v) => set({ diameter: v }, 'Resize'), 0.01)),
+        this.row('Length', h('span', { class: 'muted' }, formatLength(tubeLength(e), this.units))),
+        this.row('Path', h('span', { class: 'muted' }, `${e.path.length} points, ${e.smooth ? 'smooth' : 'straight segments'}`)),
       );
     } else {
       size.push(
@@ -363,7 +468,7 @@ export class Sidebar {
       ...sections,
       this.section('Dimensions', ...size, this.row('Bounds', h('span', { class: 'muted' }, this.boundsText([e])))),
       this.section('Position',
-        this.row(e.kind === 'box' ? 'Corner' : 'Base', this.vecInputs(e.position, (i, v) => set({ position: vec3(e.position, i, v) }, 'Move'), 'length')),
+        this.row(e.kind === 'box' ? 'Corner' : e.kind === 'sphere' ? 'Centre' : e.kind === 'tube' ? 'Start' : 'Base', this.vecInputs(e.position, (i, v) => set({ position: vec3(e.position, i, v) }, 'Move'), 'length')),
         this.row('Rotation', this.vecInputs(e.rotation, (i, v) => set({ rotation: vec3(e.rotation, i, v) }, 'Rotate'), 'angle')),
       ),
       this.actionsRow([id], [this.commandButton('edit.group', 'group', 'Group')]),
@@ -424,9 +529,10 @@ export class Sidebar {
 
   // ---- objects --------------------------------------------------------------
 
-  /** Objects tab: reference drawings, then a tree of groups and parts in model order. */
+  /** Objects tab: reference drawings, annotations, then a tree of groups and parts in model order. */
   private renderObjects() {
     if (this.doc.references.length) this.renderReferences();
+    if (this.doc.annotations.length) this.renderAnnotationList();
     if (!this.doc.entities.length) {
       this.body.append(h('p', { class: 'muted empty' }, 'No objects yet.'));
       if (!this.doc.references.length) {
@@ -503,7 +609,13 @@ export class Sidebar {
         renderEntity(e, 0);
         continue;
       }
-      const top = groupChain(e.groupId, doc.groups).at(-1)!;
+      // An operation can be mid-way (group op: parts point at the new group before it is
+      // added), and the outliner re-renders on every change; treat an unknown group as none.
+      const top = groupChain(e.groupId, doc.groups).at(-1);
+      if (!top) {
+        renderEntity(e, 0);
+        continue;
+      }
       if (!shown.has(top.id)) {
         shown.add(top.id);
         renderGroup(top, 0);
@@ -573,6 +685,26 @@ export class Sidebar {
     this.body.append(this.section(`Reference drawings`, list));
   }
 
+  private renderAnnotationList() {
+    const doc = this.doc;
+    const list = h('ul', { class: 'outliner annotations' });
+    for (const a of doc.annotations) {
+      const g = a.kind === 'dimension' ? dimensionGeometry(a, (id) => doc.get(id)) : null;
+      const text = a.kind === 'note' ? a.text : a.text ? a.text.replace(/<>/g, g ? formatLength(g.value, this.units) : '') : g ? formatLength(g.value, this.units) : '—';
+      list.append(
+        h('li', {
+          class: `outliner-item ${doc.annotationSelection.has(a.id) ? 'selected' : ''}`,
+          title: 'Click to select',
+          onclick: (ev: MouseEvent) => doc.selectAnnotations([a.id], ev.metaKey || ev.ctrlKey || ev.shiftKey),
+        },
+          h('span', { class: 'chip ref-chip', html: icon(a.kind === 'note' ? 'text' : 'dimension', 14) }),
+          h('span', { class: 'outliner-name' }, text.split('\n')[0]),
+        ),
+      );
+    }
+    this.body.append(this.section('Notes and dimensions', list));
+  }
+
   private toggleRef(id: string) {
     if (this.expandedRefs.has(id)) this.expandedRefs.delete(id);
     else this.expandedRefs.add(id);
@@ -594,7 +726,8 @@ export class Sidebar {
   private sizeSummary(e: Entity): string {
     const f = (v: number) => formatLength(v, this.units, false);
     if (e.kind === 'box') return e.size.map(f).join('×');
-    if (e.kind === 'cylinder') return `Ø${f(e.radius * 2)}×${f(e.height)}`;
+    if (e.kind === 'cylinder') return e.radiusTop === undefined ? `Ø${f(e.radius * 2)}×${f(e.height)}` : `Ø${f(e.radius * 2)}→${f(e.radiusTop * 2)}×${f(e.height)}`;
+    if (e.kind === 'sphere' && e.radii[0] === e.radii[1] && e.radii[1] === e.radii[2]) return `Ø${f(e.radii[0] * 2)}`;
     const s = worldBounds(e).getSize(new THREE.Vector3());
     return `${f(s.x)}×${f(s.y)}×${f(s.z)}`;
   }
@@ -640,11 +773,14 @@ export class Sidebar {
     this.volumeTimer = window.setTimeout(() => {
       if (this.doc.inTransaction) return; // still dragging; a later change will reschedule
       const byId = new Map<string, number>();
-      for (const { entity, geometry } of buildWorldGeometries(this.doc.entities, this.doc.entities)) {
-        byId.set(entity.id, meshVolume(geometry));
-        geometry.dispose();
-      }
-      this.volumeCache = { version: this.doc.version, byId };
+      const parts = buildWorldGeometries(this.doc.entities, this.doc.entities, this.doc.groups);
+      for (const { entity, geometry } of parts) byId.set(entity.id, meshVolume(geometry));
+      // The total fuses overlapping parts, so they count once.
+      const fused = fuseGeometries(parts.map((p) => p.geometry));
+      const total = fused ? meshVolume(fused) : [...byId.values()].reduce((a, b) => a + b, 0);
+      fused?.dispose();
+      for (const p of parts) p.geometry.dispose();
+      this.volumeCache = { version: this.doc.version, byId, total };
       if (this.tab === 'print' || this.tab === 'quantities') this.render();
     }, 250);
     return null;
@@ -730,8 +866,7 @@ export class Sidebar {
     );
     material.addEventListener('change', () => this.actions.setFilament(material.value));
     const filament = FILAMENTS.find((f) => f.id === this.actions.filament()) ?? FILAMENTS[0];
-    const vols = this.volumes();
-    const total = vols ? solids.reduce((sum, e) => sum + (vols.get(e.id) ?? 0), 0) : null;
+    const total = this.volumes() ? this.volumeCache!.total : null;
     const size = solids.length ? worldBoundsOf(solids).getSize(new THREE.Vector3()) : null;
     const f1 = (v: number) => trimNumber(v, 1);
     const modelSection = this.section('Model',
@@ -752,11 +887,7 @@ export class Sidebar {
 
   /** Area seen from above in the object's own frame (m²). */
   private footprint(e: Entity): number {
-    let mm2: number;
-    if (e.kind === 'box') mm2 = e.size[0] * e.size[1];
-    else if (e.kind === 'cylinder') mm2 = Math.PI * e.radius * e.radius;
-    else mm2 = Math.abs(polygonArea(e.points.map(([x, y]) => ({ x, y }))));
-    return mm2 / 1e6;
+    return footprintMm2(e) / 1e6;
   }
 
   private renderQuantities() {
@@ -770,7 +901,7 @@ export class Sidebar {
     const m2 = (v: number) => trimNumber(v, 2);
     const size = worldBoundsOf(solids).getSize(new THREE.Vector3());
     const m = (mm: number) => trimNumber(mm / 1000, 2);
-    const total = vols ? solids.reduce((sum, e) => sum + (vols.get(e.id) ?? 0), 0) : null;
+    const total = vols ? this.volumeCache!.total : null;
 
     const table = h('table', { class: 'cutlist' },
       h('thead', {}, h('tr', {}, h('th', {}, 'Object'), h('th', { class: 'num' }, 'Footprint m²'), h('th', { class: 'num' }, 'Volume m³'))),

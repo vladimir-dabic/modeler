@@ -1,6 +1,6 @@
 # Architecture
 
-Vite + TypeScript + Three.js, no UI framework ([ADR 0003](adr/0003-vanilla-typescript-threejs.md)). CSG (boolean operations) is done by `three-bvh-csg`. About 6k lines of TypeScript.
+Vite + TypeScript + Three.js, no UI framework ([ADR 0003](adr/0003-vanilla-typescript-threejs.md)). Boolean operations (holes) are done by the **Manifold** WebAssembly engine, with `three-bvh-csg` as the fallback ([ADR 0017](adr/0017-manifold-geometry-engine.md)). About 6k lines of TypeScript.
 
 ## Layers
 
@@ -55,6 +55,17 @@ flowchart TB
 | `box` | `size: [x, y, z]` | spans `[0, size]` from the origin |
 | `cylinder` | `radius`, `height`, `segments` | base centre at the origin, extends +Z |
 | `extrusion` | `points: [x, y][]`, `height` | closed outline on local XY, extruded +Z |
+| `sphere` | `radii: [x, y, z]`, `segments` | sphere / ellipsoid centred on the origin |
+| `revolve` | `profile: [r, z][]` (r ≥ 0), `segments` | closed profile spun 360° around local Z |
+| `tube` | `path: [x, y, z][]` (first = origin), `radius`, `radii?` (per point), `smooth`, `segments` | round tube along the path, flat ends |
+
+Holes have two optional flags:
+- `holeScope: 'group'` makes a hole cut only parts in its own group subtree. `cuttersFor(solid, holes, groups)` applies it.
+- `quiet` marks a helper cutter, drawn only while selected.
+
+Export and volume totals fuse the cut solids into one watertight solid (`fuseGeometries` in `csg.ts`); `split_for_print` builds pieces from copies plus scoped quiet cutters plus pegs ([ADR 0018](adr/0018-print-workflow-fuse-scope-split.md)).
+
+Two optional fields refine existing kinds: a box's `edgeRadius` (rounded edges and corners) and a cylinder's `radiusTop` (cone or frustum; 0 = pointed, either end may be 0). The meshes of the round and smooth kinds come from `src/model/shapes.ts`. They're closed solids with outward faces, which hole cutting and STL rely on.
 
 All kinds share `id`, `name`, `position` (world mm), `rotation` (Euler XYZ, degrees), `color`, `hole`, `visible`, and an optional `groupId`. World units: **mm, Z-up** (X red, Y green, Z blue).
 
@@ -76,9 +87,32 @@ Imported plans (DXF) to trace and snap to. They are **not part of the model**: n
 - `src/model/dxf.ts` parses ASCII DXF into that geometry. `src/model/references.ts` has the placement matrix (`referenceMatrix`: drawing units → mm, rotate, translate), bounds, snap points and file validation.
 - The viewport draws each drawing as one `LineSegments` (rebuilt only when layers change; placement is a matrix). The snapper adds its corners, segment midpoints and arc/circle centres.
 
+### Annotations ([ADR 0015](adr/0015-annotations-notes-and-dimensions.md))
+
+Notes and dimensions in `doc.annotations`. They're snapshotted (one undo step per change), saved in the file, never geometry.
+- An `Anchor` is `{ point }` or `{ entity, at }`, where `at` = fractions of the part's local box. `resolveAnchor` turns it into a world point through the part's current matrix, so anchors follow moves, rotations and resizes.
+- `Document.remove` prunes annotations whose parts are gone, in the same transaction. Hidden parts hide their annotations.
+- `src/model/annotations.ts` has anchors, dimension geometry, pruning and validation (DOM-free).
+- `src/viewport/AnnotationLayer.ts` draws them: HTML labels, lines on top of the model, ticks of constant screen size. `hitTest(px)` is how the Select tool picks them.
+- Selection is `doc.annotationSelection`, exclusive with the part selection.
+- The Text and Dimension tools create annotations through the API (`ToolContext.call`).
+
+### Exploded view
+
+A display state in the viewport, never a model change: no transaction, no undo step, not saved.
+- `src/model/explode.ts` (`explodeOffsets`, DOM-free) groups visible parts into units, the same units a click selects (ADR 0011): top-level groups and loose parts, or the children of the open group. Each unit moves away from the assembly's centre in proportion to its distance (×2.5 at full spread), optionally along one axis only.
+- `Viewport.setExplode` applies the offsets as object matrices. Zoom-to-fit, renders and rectangle selection use the drawn positions; snapping and the model don't.
+- **Stands on the floor:** after spreading, everything is lifted so the lowest part sits at the model's original bottom.
+- **Presentation look:** the grid, axes, bed and scale figure live under one `stage` node, hidden while exploded together with reference drawings, on a studio-gradient background. Annotations are suppressed.
+- **Look-only** ([ADR 0019](adr/0019-exploded-view-look-only.md)):
+  - `App.uiCall` refuses write/history operations, and undo/redo are refused too; the Sidebar is `setLocked`;
+  - editing tools, New, Open and Import reassemble first;
+  - bridge (MCP) edits reassemble first through `BridgeClient.beforeRequest(operation)`.
+- API: `explode_view` (host) and `render_views { explode }`.
+
 ### Document and transactions ([ADR 0002](adr/0002-document-transactions-snapshot-undo.md))
 
-`ModelDocument` (`src/model/Document.ts`) owns `entities`, `groups`, `references` (+ their geometry), `selection`, `openGroupId`, `units` and document settings (`workspace`, `printer`).
+`ModelDocument` (`src/model/Document.ts`) owns `entities`, `groups`, `annotations`, `references` (+ their geometry), `selection`, `annotationSelection`, `openGroupId`, `units` and document settings (`workspace`, `printer`).
 
 - `begin()` → mutations → `commit()` records **one undo step** (a JSON snapshot); `cancel()` rolls back. `transact(fn)` wraps a function, joining an open transaction if there is one.
 - Every mutation emits `onChange({committed})`. `committed: false` during a drag, so the viewport updates live; `true` on commit, which triggers autosave.
@@ -92,6 +126,9 @@ Imported plans (DXF) to trace and snap to. They are **not part of the model**: n
 `Viewport.sync()` rebuilds a mesh only when its entity changed. The cache key is the entity JSON plus the JSON of every hole overlapping it, so moving a hole re-cuts only the solids it touches. Per entity:
 
 - **Mesh:** `buildCutGeometry` in `csg.ts` makes the geometry, with holes subtracted ([ADR 0005](adr/0005-holes-as-csg-cutters.md)).
+  - It uses Manifold (`manifold.ts`: all holes in one exact, watertight batch) once `initManifold()` has loaded the WebAssembly, and three-bvh-csg before that, or if Manifold rejects an input ([ADR 0017](adr/0017-manifold-geometry-engine.md)).
+  - When the engine becomes ready, `Viewport.rebuildAll()` re-cuts everything.
+  - Manifold objects live in WebAssembly memory: free every one (`.delete()`); `manifold.ts` does it in `finally`.
 - **Edges:** `featureEdges` in `edges.ts` draws creases above 25° plus open boundaries, and drops seams that CSG leaves inside flat faces.
 - **Styling:** `updateStyles()` applies selection, hover, print-warning, hole and x-ray looks.
 
@@ -119,17 +156,19 @@ Scene helpers:
 | What | Where | Key / format |
 |---|---|---|
 | Model (autosave) | `localStorage` | `modeler.autosave.v1`, a `DocumentFile` |
-| Project file | download / open / drag-drop | `*.modeler.json`: `{format: 'modeler', version: 1, units, workspace, printer, entities, groups, references?}`; each reference carries its `geometry` |
+| Project file | Save / Save As / Open / drag-drop: written back in place where the File System Access API exists, else downloaded ([ADR 0016](adr/0016-project-files-save-in-place.md)) | `*.modeler.json`: `{format: 'modeler', version: 1, units, workspace, printer, entities, groups, annotations?, references?}`; each reference carries its `geometry` |
 | Reference drawing source | import / drag-drop | `*.dxf` (ASCII), converted on import; the DXF itself isn't kept |
 | App settings (snap per workspace, cut preview, filament) | `localStorage` | `modeler.settings.v1` |
 | Shortcut overrides, hold keys | `localStorage` | `modeler.keymap.v1` |
 | Last sidebar tab | `localStorage` | `modeler.sidebarTab` |
+| Current file + recent files (file handles) | IndexedDB | database `modeler`, store `files`, keys `current`, `recent` |
 
 Loading is defensive (`parseDocumentFile`):
 - invalid entities are dropped and duplicate ids re-issued;
 - references to missing groups are removed, and empty groups pruned;
 - unknown workspaces or printers fall back to defaults;
-- malformed reference drawings or paths are dropped.
+- malformed reference drawings or paths are dropped;
+- malformed annotations, and annotations attached to missing parts, are dropped.
 
 If the autosave doesn't fit in `localStorage` (a large reference drawing), it is saved without reference drawings and the user is told once to save the project.
 
@@ -143,7 +182,8 @@ These must hold after every committed change. The Modeler API enforces them in `
 4. One user action, or one AI turn, is **one undo step**.
 5. The model layer (`src/model`) never imports from `viewport`, `ui`, `tools`, `api` or the DOM, and `src/api` imports only `src/model`.
 6. Every group has at least one member (directly or through subgroups); `groupId` / `parentId` never point at missing groups.
-7. Reference drawings never affect the model: tools, CSG, cut lists, quantities and exports read `doc.entities` only.
+7. Reference drawings and annotations never affect the model: tools, CSG, cut lists, quantities and exports read `doc.entities` only.
+8. Every annotation's part anchors point at existing parts.
 
 ## Module map
 
@@ -169,13 +209,18 @@ src/
     naming.ts           "Shelf" → "Shelf 2"
     quantities.ts       footprints and CSG volumes
     geometry.ts         meshes from entities, bounds, snap points, faces, push/pull, drawing planes
-    csg.ts              hole subtraction (three-bvh-csg), world geometry for export
+    csg.ts              hole subtraction (engine choice + three-bvh-csg fallback), world geometry for export
+    manifold.ts         the Manifold engine: load, mesh ↔ Manifold, subtract/union, volume
     units.ts            parse/format lengths and angles
     cutlist.ts          cut list grouping + CSV
     io.ts               file parse/validate, STL export, autosave, settings
     dxf.ts              ASCII DXF → reference-drawing geometry (blocks, bulges, OCS)
     references.ts       reference drawings: placement matrix, bounds, snap points, validation
+    annotations.ts      notes/dimensions: anchors, dimension geometry, pruning, validation
+    shapes.ts           meshes for rounded boxes, spheres, revolves, tubes; outward-winding check
+    explode.ts          exploded-view offsets per unit (display only)
     workspaces.ts       workspace configs, printers, fit check, volume
+  ui/ProjectFiles.ts  project files: open/save in place, Save As, recent files, download fallback
   viewport/           Three.js rendering + picking
     Viewport.ts         scene, cameras, zoom, entity→mesh sync, styles, picking, highlights
     Snapper.ts          inference engine

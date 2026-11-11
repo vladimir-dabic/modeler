@@ -22,6 +22,8 @@ export interface Inference {
   kind: InferenceKind;
   /** Face under the cursor, if any (used to pick drawing planes). */
   hit: PickHit | null;
+  /** The part (or reference drawing) a snap point belongs to; annotations attach to it. */
+  sourceId?: string;
 }
 
 export interface SnapSettings {
@@ -105,7 +107,7 @@ export class Snapper {
   freePoint(px: THREE.Vector2, exclude?: Set<string>, extra?: SnapPoint[]): Inference | null {
     const hit = this.viewport.pick(px, exclude);
     const sp = this.findSnapPoint(px, exclude, extra);
-    if (sp) return { point: sp.point.clone(), kind: sp.kind, hit };
+    if (sp) return { point: sp.point.clone(), kind: sp.kind, hit, sourceId: sp.entityId };
 
     if (hit) {
       const p = hit.point.clone();
@@ -114,7 +116,7 @@ export class Snapper {
         const axis = Math.abs(hit.normal.x) > 0.5 ? 0 : Math.abs(hit.normal.y) > 0.5 ? 1 : 2;
         for (let i = 0; i < 3; i++) if (i !== axis) p.setComponent(i, this.round(p.getComponent(i)));
       }
-      return { point: p, kind: 'face', hit };
+      return { point: p, kind: 'face', hit, sourceId: hit.entity.id };
     }
 
     const ray = this.viewport.rayAt(px);

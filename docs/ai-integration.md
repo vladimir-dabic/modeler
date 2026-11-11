@@ -1,6 +1,6 @@
 # AI integration
 
-> **Status:** the Modeler API ([modeler-api.md](modeler-api.md), [api-reference.md](api-reference.md)) and the **MCP server** ([mcp/README.md](../mcp/README.md)) are **implemented**. The in-app panel is **next**. Decisions: [ADR 0009](adr/0009-ai-assistant-in-app-and-mcp.md), [ADR 0013](adr/0013-mcp-server-bridge-and-files.md).
+> **Status:** the Modeler API ([modeler-api.md](modeler-api.md), [api-reference.md](api-reference.md)) and the **MCP server** ([mcp/README.md](../mcp/README.md)) are **implemented**. The in-app panel is **on hold**. Decisions: [ADR 0009](adr/0009-ai-assistant-in-app-and-mcp.md), [ADR 0013](adr/0013-mcp-server-bridge-and-files.md).
 
 There will be two ways to model with AI, and both drive the same Modeler API operations:
 
@@ -136,6 +136,16 @@ Close codes: `4000`: another tab took over; `4001`: protocol mismatch.
 - Offscreen `render_views` in headless mode.
 - An MCP resource with the per-workspace guide, if clients make good use of resources; the guide currently goes in `instructions`.
 
+## Tips: interior layouts over MCP today
+
+Until the Interior workspace exists (roadmap), this works in Claude Code with the app connected:
+
+1. **The plan:** put the blueprint (PDF or image) in the MCP working folder and ask Claude to **read it itself**. Claude Code reads images and PDFs directly, including the dimensions written on the plan. A DXF plan can be imported instead (`import_dxf`).
+2. **Shell:** Claude switches to Build and builds the walls (250 mm exterior, 100–150 mm interior), door and window openings (holes) and a floor, from the plan's dimensions, grouped per room.
+3. **Furniture:** standard sizes, one named group per piece, so it shows up in Objects and can be moved as a unit.
+4. **Check:** `render_views { views: ['top'] }` for an overview, `measure` for walkways (≥ 900 mm), bed access (≥ 600 mm) and door swings. Annotate the key clearances.
+5. **Variants:** one top-level group per layout ("Layout A", "Layout B"), shown one at a time with `set_visible`, or `save_file` each to its own file.
+
 ## Safety and trust
 
 - Every AI change is undoable and labelled. AI turns never touch undo history beyond their own step.
@@ -148,4 +158,4 @@ Close codes: `4000`: another tab took over; `4001`: protocol mismatch.
 1. ✅ **Modeler API** (`src/api`), with operation and scenario tests and a generated reference.
 2. ✅ **Groups** (part of the API and UI). Components (linked copies) come later.
 3. ✅ **MCP headless + live bridge** ([above](#mcp-server)). The fastest path to real AI modeling (uses the Claude subscription). Use it on real requests to tune the tool descriptions.
-4. **Next: in-app assistant panel:** proxy, streaming, selection context, Keep/Undo, render_views. Reuse `src/api/guide.ts` for the system prompt and `toolDefinitions()` for the tools (without the file operations).
+4. **In-app assistant panel (on hold, 2026-11-10: MCP covers AI modeling for now):** proxy, streaming, selection context, Keep/Undo, render_views. Reuse `src/api/guide.ts` for the system prompt and `toolDefinitions()` for the tools (without the file operations).

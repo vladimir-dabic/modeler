@@ -4,11 +4,13 @@ import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRe
 import { buildCutGeometry, cuttersFor } from '../model/csg';
 import type { ModelDocument } from '../model/Document';
 import { entityMatrix, worldBoundsOf } from '../model/geometry';
+import { explodeOffsets, type ExplodeAxis } from '../model/explode';
 import { isInsideGroup } from '../model/groups';
 import { referenceBounds, referenceMatrix, referenceSegments } from '../model/references';
 import type { Entity } from '../model/types';
 import type { WorkspaceConfig } from '../model/workspaces';
 import { featureEdges } from './edges';
+import { AnnotationLayer } from './AnnotationLayer';
 import { Grid } from './Grid';
 import { makeScaleFigure, PrintPlate } from './SceneHelpers';
 import { COLORS, disposeObject } from './overlay';
@@ -48,6 +50,22 @@ const VIEW_DIRS: Record<ViewName, THREE.Vector3> = {
 };
 
 const BACKGROUND = 0xeef1f5;
+
+/** A soft vertical fade (light at the top, slightly darker below) for the exploded view. */
+function studioBackground(): THREE.Texture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 2;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d')!;
+  const g = ctx.createLinearGradient(0, 0, 0, 256);
+  g.addColorStop(0, '#f4f6f9');
+  g.addColorStop(1, '#c9d0da');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 2, 256);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
 const FOV = 35;
 
 export class Viewport {
@@ -57,6 +75,14 @@ export class Viewport {
   readonly orthoCamera: THREE.OrthographicCamera;
   readonly controls: OrbitControls;
   readonly overlayRoot = new THREE.Group();
+  /** Grid, axes, print bed and scale figure: the "workshop floor" around the model. */
+  private readonly stage = new THREE.Group();
+  private presentationBackground: THREE.Texture | null = null;
+  /** Exploded view: display-only offsets per entity (the model never moves). */
+  private explodeState: { factor: number; axis: ExplodeAxis | null } = { factor: 0, axis: null };
+  private explodeMap = new Map<string, THREE.Vector3>();
+  /** Notes and dimensions (ADR 0015). */
+  readonly annotations: AnnotationLayer;
   /** Reference drawings (ADR 0014): lines only, never picked. */
   private readonly referenceRoot = new THREE.Group();
   private readonly referenceObjects = new Map<string, { key: string; lines: THREE.LineSegments }>();
@@ -111,7 +137,8 @@ export class Viewport {
     this.setNavigationMode('default');
     this.controls.addEventListener('change', () => this.requestRender());
 
-    this.scene.add(this.entityRoot, this.referenceRoot, this.overlayRoot);
+    this.annotations = new AnnotationLayer(this.doc, this);
+    this.scene.add(this.entityRoot, this.referenceRoot, this.annotations.root, this.overlayRoot);
     this.addLights();
     this.addGridAndAxes();
 
@@ -174,7 +201,9 @@ export class Viewport {
   }
 
   private addGridAndAxes() {
-    this.scene.add(this.grid.mesh, this.plate.group, this.scaleFigure);
+    // Everything that frames the model (hidden as a whole in the exploded view).
+    this.scene.add(this.stage);
+    this.stage.add(this.grid.mesh, this.plate.group, this.scaleFigure);
     this.plate.group.visible = false;
     this.scaleFigure.visible = false;
 
@@ -195,7 +224,7 @@ export class Viewport {
         new THREE.LineDashedMaterial({ color, dashSize: 20, gapSize: 15, transparent: true, opacity: 0.6 }),
       );
       neg.computeLineDistances();
-      this.scene.add(pos, neg);
+      this.stage.add(pos, neg);
     }
   }
 
@@ -280,7 +309,7 @@ export class Viewport {
   /** Fit the view to the given entities (or everything visible, reference drawings included). */
   zoomExtents(entities?: Entity[]) {
     const list = (entities?.length ? entities : this.doc.entities).filter((e) => e.visible);
-    const box = list.length ? worldBoundsOf(list) : new THREE.Box3();
+    const box = this.displayBounds(list);
     if (!entities?.length) box.union(this.referencesBox());
     this.fitBox(box.isEmpty() ? this.homeBox.clone() : box);
   }
@@ -432,13 +461,24 @@ export class Viewport {
    * Render PNGs (base64, no data: prefix) of the visible model from standard views,
    * off-screen, without touching the user's camera or canvas size.
    */
-  async renderViewImages(views: ViewName[], size: number): Promise<{ view: ViewName; png: string }[]> {
+  async renderViewImages(views: ViewName[], size: number, opts?: { explode?: number; axis?: ExplodeAxis }): Promise<{ view: ViewName; png: string }[]> {
+    // An exploded render leaves the user's own view as it was.
+    const saved = this.explode;
+    if (opts?.explode !== undefined) this.setExplode(opts.explode, opts.axis ?? null);
+    try {
+      return await this.renderViewImagesNow(views, size);
+    } finally {
+      if (opts?.explode !== undefined) this.setExplode(saved.factor, saved.axis);
+    }
+  }
+
+  private async renderViewImagesNow(views: ViewName[], size: number): Promise<{ view: ViewName; png: string }[]> {
     const target = new THREE.WebGLRenderTarget(size, size, { samples: 4 });
     target.texture.colorSpace = THREE.SRGBColorSpace;
     const cam = new THREE.PerspectiveCamera(FOV, 1, 1, 1e6);
     cam.up.set(0, 0, 1);
     const list = this.doc.entities.filter((e) => e.visible);
-    const box = (list.length ? worldBoundsOf(list) : new THREE.Box3()).union(this.referencesBox());
+    const box = this.displayBounds(list).union(this.referencesBox());
     if (box.isEmpty()) box.copy(this.homeBox);
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const radius = Math.max(sphere.radius, 10);
@@ -465,6 +505,7 @@ export class Viewport {
         const img = ctx2d.createImageData(size, size);
         for (let y = 0; y < size; y++) img.data.set(pixels.subarray((size - 1 - y) * size * 4, (size - y) * size * 4), y * size * 4);
         ctx2d.putImageData(img, 0, 0);
+        this.annotations.drawLabels(ctx2d, cam, size);
         out.push({ view, png: canvas.toDataURL('image/png').split(',')[1] });
       }
     } finally {
@@ -485,9 +526,16 @@ export class Viewport {
       this.renderQueued = false;
       this.updateClipping();
       this.updateGridFade();
+      this.annotations.updateScale();
       this.renderer.render(this.scene, this.camera);
       this.labelRenderer.render(this.scene, this.camera);
     });
+  }
+
+  /** Rebuild every mesh (e.g. after the geometry engine changed). */
+  rebuildAll() {
+    for (const obj of this.objects.values()) obj.key = '';
+    this.sync();
   }
 
   /** Rebuild meshes for entities that changed since the last sync. */
@@ -499,7 +547,7 @@ export class Viewport {
 
     for (const e of entities) {
       seen.add(e.id);
-      const cutters = this.showCuts ? cuttersFor(e, holes, bounds) : [];
+      const cutters = this.showCuts ? cuttersFor(e, holes, this.doc.groups, bounds) : [];
       const key = JSON.stringify(e) + '|' + cutters.map((h) => JSON.stringify(h)).join('|');
       const existing = this.objects.get(e.id);
       if (existing && existing.key === key) continue;
@@ -513,7 +561,10 @@ export class Viewport {
       }
     }
     this.syncReferences();
+    this.annotations.sync();
     this.updateStyles();
+    // New annotation labels only reach the DOM when the label renderer runs.
+    this.requestRender();
   }
 
   /** Lines are rebuilt only when the visible layers change; placement is just a matrix. */
@@ -587,8 +638,70 @@ export class Viewport {
     disposeObject(obj.group);
   }
 
+  /** Bounds of parts where they are drawn (moved apart in the exploded view). */
+  private displayBounds(list: Entity[]): THREE.Box3 {
+    const box = new THREE.Box3();
+    for (const e of list) {
+      const b = worldBoundsOf([e]);
+      const o = this.explodeMap.get(e.id);
+      box.union(o ? b.translate(o) : b);
+    }
+    return box;
+  }
+
+  /** Pull the model apart for viewing (factor 0 = assembled … 1 = fully exploded), optionally along one axis. */
+  setExplode(factor: number, axis: ExplodeAxis | null = this.explodeState.axis) {
+    this.explodeState = { factor: Math.max(0, Math.min(1, factor)), axis };
+    this.applyExplode();
+  }
+
+  get explode(): { factor: number; axis: ExplodeAxis | null } {
+    return { ...this.explodeState };
+  }
+
+  get exploded(): boolean {
+    return this.explodeState.factor > 0;
+  }
+
+  /** How far an entity is displaced in the exploded view (undefined = not moved). */
+  explodeOffset(id: string): THREE.Vector3 | undefined {
+    return this.explodeMap.get(id);
+  }
+
+  private applyExplode() {
+    const { factor, axis } = this.explodeState;
+    this.explodeMap = explodeOffsets(this.doc.entities, this.doc.groups, this.doc.openGroupId, factor, axis);
+    for (const [id, obj] of this.objects) {
+      const e = this.doc.get(id);
+      if (!e) continue;
+      const m = entityMatrix(e);
+      const o = this.explodeMap.get(id);
+      if (o) m.premultiply(new THREE.Matrix4().makeTranslation(o.x, o.y, o.z));
+      obj.group.matrix.copy(m);
+      obj.group.updateMatrixWorld(true);
+    }
+    // Notes and dimensions are anchored to the assembled model.
+    this.annotations.suppressed = factor > 0;
+    this.setPresentation(factor > 0);
+    this.requestRender();
+  }
+
+  /**
+   * The exploded view's own look: no grid, axes, bed, scale figure or reference drawings,
+   * on a soft studio background, so floating parts read clearly.
+   */
+  private setPresentation(on: boolean) {
+    this.stage.visible = !on;
+    this.referenceRoot.visible = !on;
+    if (on) this.presentationBackground ??= studioBackground();
+    this.scene.background = on ? this.presentationBackground : null;
+  }
+
   /** Apply selection / hover / hole / x-ray styling to all entity materials. */
   updateStyles() {
+    this.annotations.setSelected(this.doc.annotationSelection);
+    // Model edits and opening/closing groups change what explodes and where.
+    if (this.explodeState.factor > 0) this.applyExplode();
     for (const e of this.doc.entities) {
       const obj = this.objects.get(e.id);
       if (!obj) continue;
@@ -618,7 +731,9 @@ export class Viewport {
         m.emissiveIntensity = 0.2;
       }
       obj.edgeMaterial.color.set(edgeColor);
-      obj.group.visible = e.visible;
+      // Quiet helper cutters show only while selected (or while their group is open).
+      const quietHidden = e.hole && e.quiet && !selected && !(this.doc.openGroupId && isInsideGroup(e, this.doc.openGroupId, this.doc.groups));
+      obj.group.visible = e.visible && !quietHidden;
     }
     this.requestRender();
   }

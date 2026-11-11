@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { revolveBounds, revolveGeometry, roundedBoxGeometry, sphereGeometry, tubeBounds, tubeGeometry, tubeSamples } from './shapes';
 import type { BoxEntity, CylinderEntity, Entity, ExtrusionEntity, Vec3 } from './types';
 
 export const DEG = Math.PI / 180;
@@ -40,16 +41,26 @@ export function cleanVec(v: THREE.Vector3): Vec3 {
 export function buildLocalGeometry(e: Entity): THREE.BufferGeometry {
   switch (e.kind) {
     case 'box': {
+      if (e.edgeRadius && e.edgeRadius > 0) return roundedBoxGeometry(e);
       const [x, y, z] = e.size.map((s) => Math.max(s, 0.001));
       return new THREE.BoxGeometry(x, y, z).translate(x / 2, y / 2, z / 2);
     }
     case 'cylinder': {
-      const r = Math.max(e.radius, 0.001);
+      // A cone may come to a point at either end (radius 0), never at both.
+      const r = e.radiusTop === undefined ? Math.max(e.radius, 0.001) : Math.max(e.radius, 0);
+      const top = e.radiusTop === undefined ? r : Math.max(e.radiusTop, r > 0 ? 0 : 0.001);
       const h = Math.max(e.height, 0.001);
-      return new THREE.CylinderGeometry(r, r, h, Math.max(3, Math.round(e.segments)))
+      // three's cylinder runs along Y with the top first; ours runs along Z from the base.
+      return new THREE.CylinderGeometry(top, r, h, Math.max(3, Math.round(e.segments)))
         .rotateX(Math.PI / 2)
         .translate(0, 0, h / 2);
     }
+    case 'sphere':
+      return sphereGeometry(e);
+    case 'revolve':
+      return revolveGeometry(e);
+    case 'tube':
+      return tubeGeometry(e);
     case 'extrusion': {
       const shape = new THREE.Shape(e.points.map(([x, y]) => new THREE.Vector2(x, y)));
       return new THREE.ExtrudeGeometry(shape, {
@@ -65,11 +76,16 @@ export function localBounds(e: Entity): THREE.Box3 {
   switch (e.kind) {
     case 'box':
       return new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(...e.size));
-    case 'cylinder':
-      return new THREE.Box3(
-        new THREE.Vector3(-e.radius, -e.radius, 0),
-        new THREE.Vector3(e.radius, e.radius, e.height),
-      );
+    case 'cylinder': {
+      const r = Math.max(e.radius, e.radiusTop ?? 0);
+      return new THREE.Box3(new THREE.Vector3(-r, -r, 0), new THREE.Vector3(r, r, e.height));
+    }
+    case 'sphere':
+      return new THREE.Box3(new THREE.Vector3(...e.radii).negate(), new THREE.Vector3(...e.radii));
+    case 'revolve':
+      return revolveBounds(e);
+    case 'tube':
+      return tubeBounds(e);
     case 'extrusion': {
       const box = new THREE.Box3();
       for (const [x, y] of e.points) {
@@ -129,13 +145,44 @@ export function snapPoints(e: Entity): SnapPoint[] {
     add(sx / 2, sy / 2, sz, 'center');
     add(sx / 2, sy / 2, 0, 'center');
   } else if (e.kind === 'cylinder') {
-    for (const z of [0, e.height]) {
-      add(0, 0, z, 'center');
-      for (let i = 0; i < 4; i++) {
-        const a = (i * Math.PI) / 2;
-        add(Math.cos(a) * e.radius, Math.sin(a) * e.radius, z, 'endpoint');
+    const top = e.radiusTop ?? e.radius;
+    for (const [z, r] of [
+      [0, e.radius],
+      [e.height, top],
+    ]) {
+      add(0, 0, z, r > 0 ? 'center' : 'endpoint');
+      if (r > 0) {
+        for (let i = 0; i < 4; i++) {
+          const a = (i * Math.PI) / 2;
+          add(Math.cos(a) * r, Math.sin(a) * r, z, 'endpoint');
+        }
       }
     }
+  } else if (e.kind === 'sphere') {
+    const [rx, ry, rz] = e.radii;
+    add(0, 0, 0, 'center');
+    for (const s of [-1, 1]) {
+      add(s * rx, 0, 0, 'endpoint');
+      add(0, s * ry, 0, 'endpoint');
+      add(0, 0, s * rz, 'endpoint');
+    }
+  } else if (e.kind === 'revolve') {
+    const zs = e.profile.map((p) => p[1]);
+    add(0, 0, Math.min(...zs), 'center');
+    add(0, 0, Math.max(...zs), 'center');
+    for (const [r, z] of e.profile) {
+      if (r < 1e-6) continue;
+      for (let i = 0; i < 4; i++) {
+        const a = (i * Math.PI) / 2;
+        add(Math.cos(a) * r, Math.sin(a) * r, z, 'endpoint');
+      }
+    }
+  } else if (e.kind === 'tube') {
+    // The centre line: its ends are corners, the points it passes through are centres.
+    e.path.forEach(([x, y, z], i) => add(x, y, z, i === 0 || i === e.path.length - 1 ? 'endpoint' : 'center'));
+    const { points } = tubeSamples(e);
+    const mid = points[Math.floor(points.length / 2)];
+    add(mid.x, mid.y, mid.z, 'midpoint');
   } else {
     const pts = e.points;
     for (const z of [0, e.height]) {
@@ -177,9 +224,12 @@ export function classifyFace(e: Entity, localNormal: THREE.Vector3, localPoint: 
     const expected = sign > 0 ? e.size[axis] : 0;
     return Math.abs(coord - expected) < tol ? { kind: 'box', axis, sign } : null;
   }
+  // Round and smooth kinds (sphere, revolve, tube) have no push/pull faces.
+  if (e.kind !== 'cylinder' && e.kind !== 'extrusion') return null;
   if (n.z > 0.999 && Math.abs(p.z - e.height) < tol) return { kind: 'cap', top: true };
   if (n.z < -0.999 && Math.abs(p.z) < tol) return { kind: 'cap', top: false };
-  if (e.kind === 'cylinder' && Math.abs(n.z) < 0.01) {
+  // Cones and frusta have a slanted side: only the caps push/pull (change size in Properties).
+  if (e.kind === 'cylinder' && e.radiusTop === undefined && Math.abs(n.z) < 0.01) {
     const facetTol = e.radius * (1 - Math.cos(Math.PI / Math.max(3, e.segments))) + 1e-2;
     if (Math.abs(Math.hypot(p.x, p.y) - e.radius) <= facetTol) return { kind: 'side' };
   }
@@ -210,7 +260,7 @@ export function applyPushPull(orig: Entity, target: Entity, face: FaceRef, dista
     target.size[face.axis] = cleanNumber(size);
     const axis = new THREE.Vector3().setComponent(face.axis, 1);
     shiftAlongLocal(axis, face.sign < 0 ? -grown : 0);
-  } else if (face.kind === 'cap' && orig.kind !== 'box' && target.kind !== 'box') {
+  } else if (face.kind === 'cap' && (orig.kind === 'cylinder' || orig.kind === 'extrusion') && (target.kind === 'cylinder' || target.kind === 'extrusion')) {
     const height = Math.max(MIN_SIZE, orig.height + distance);
     target.height = cleanNumber(height);
     shiftAlongLocal(new THREE.Vector3(0, 0, 1), face.top ? 0 : -(height - orig.height));
@@ -453,7 +503,17 @@ export function mirrorEntity(e: Entity, axis: 0 | 1 | 2, c: number): void {
     // Local coordinates along k now run negative; shift so the box spans [0, size] again.
     pos.addScaledVector(localAxis, -e.size[k]);
   } else if (e.kind === 'cylinder') {
-    if (k === 2) pos.addScaledVector(localAxis, -e.height);
+    if (k === 2) {
+      pos.addScaledVector(localAxis, -e.height);
+      // Upside down: the old top is the new base.
+      if (e.radiusTop !== undefined) [e.radius, e.radiusTop] = [e.radiusTop, e.radius];
+    }
+  } else if (e.kind === 'sphere') {
+    // Symmetric about its centre: nothing to adjust.
+  } else if (e.kind === 'revolve') {
+    if (k === 2) e.profile = e.profile.map(([r, z]) => [r, cleanNumber(-z)]);
+  } else if (e.kind === 'tube') {
+    e.path = e.path.map((p) => p.map((v, i) => (i === k ? cleanNumber(-v) : v)) as Vec3);
   } else {
     if (k === 2) pos.addScaledVector(localAxis, -e.height);
     else e.points = e.points.map(([x, y]) => (k === 0 ? [cleanNumber(-x), y] : [x, cleanNumber(-y)]));

@@ -16,8 +16,9 @@ npm run dev          # http://localhost:5173 (hot reload)
 | `npm run smoke` | end-to-end test: drives the real UI in headless Chrome. **Needs `npm run dev` running.** Screenshots go to `test-results/` (ignored); `node scripts/smoke.mjs <dir>` writes elsewhere |
 | `npm run typecheck` | `tsc --noEmit` over `src`, `tests`, `mcp/src`, `vite.config.ts` |
 | `npm run build` | type-check + production build into `dist/` |
+| `npm run bench:csg` | old vs new geometry engine on representative scenes → `test-results/csg-bench.md` ([ADR 0017](adr/0017-manifold-geometry-engine.md)) |
 | `npm run docs:api` | regenerate `docs/api-reference.md` from the operation definitions |
-| `npm run build:mcp` | bundle the MCP server into `mcp/dist/modeler-mcp.mjs` (rebuild after changing `src/api`, `src/model` or `mcp/src`); see [mcp/README.md](../mcp/README.md) |
+| `npm run build:mcp` | bundle the MCP server into `mcp/dist/modeler-mcp.mjs`. Usually not needed: `mcp/run.mjs` (what Claude runs) rebuilds when sources changed. A *running* server keeps its old code until it's restarted (`/mcp` → Reconnect). See [mcp/README.md](../mcp/README.md#managing-the-server) |
 
 `window.modeler` is the live `App` instance in the browser console. It's useful for debugging (`modeler.doc.entities`, `modeler.viewport.zoomExtents()`) and is what the smoke test uses.
 
@@ -80,10 +81,22 @@ The shortcuts dialog picks it up automatically.
 
 ### Add an entity kind
 
-1. Extend `types.ts`.
-2. Update `geometry.ts`: `buildLocalGeometry`, `localBounds`, `snapPoints`, `classifyFace`, `applyPushPull`.
-3. Update `io.ts` (`parseEntity`), `cutlist.ts`, the Sidebar properties, and (when it exists) the API schemas.
-4. Add unit tests, plus a record in the ADR log if it changes the modeling approach.
+1. Extend `types.ts` (`EntityKind` and the `Entity` union). Then `npm run typecheck` lists most places that branch on kind.
+2. **Geometry:**
+   - complex meshes go in `shapes.ts` (closed, outward; `ensureOutward` fixes the winding);
+   - `geometry.ts`: `buildLocalGeometry`, `localBounds`, `snapPoints`, `classifyFace` (return null if it can't push/pull), `applyPushPull`, `mirrorEntity`;
+   - `csg.ts` `grownCutter`, so it can be a clean hole with the fallback engine (Manifold needs no growth). The mesh must be a closed solid, or Manifold rejects it.
+3. **Silent defaults the compiler won't catch:**
+   - `io.ts` `parseEntity`: unknown kinds are dropped from files;
+   - `cutlist.ts`, `quantities.ts` (`footprintMm2`).
+4. **API:**
+   - an `add_…` operation;
+   - the field → kinds table in `update_entity`;
+   - `shapeText`, `entitySummary` and `validateEntity` in `core.ts`;
+   - the `Kind` enum in `schemas.ts`;
+   - then `npm run docs:api`.
+5. **UI:** the `KIND_ICON` / `KIND_NAME` maps and the properties in `Sidebar.ts`, `KIND_LABEL` in `Document.ts`, an icon, and a tool if it needs one.
+6. Unit tests (volume against the formula, outward faces, file round trip, mirror), a smoke step, and an ADR if it changes the modeling approach.
 
 ### Add a workspace setting
 

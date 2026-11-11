@@ -15,7 +15,8 @@ export const Rotation = z.tuple([Num, Num, Num]).describe('Euler XYZ rotation in
 export const Axis = z.enum(['x', 'y', 'z']);
 export const Color = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'must be a hex colour like #e9c98f');
 export const Id = z.string().min(1);
-export const Kind = z.enum(['box', 'cylinder', 'extrusion']);
+export const Kind = z.enum(['box', 'cylinder', 'extrusion', 'sphere', 'revolve', 'tube']);
+export const NonNegative = z.number().min(0).refine(Number.isFinite, 'must be a finite number');
 
 export const Target = z
   .union([

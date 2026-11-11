@@ -96,8 +96,8 @@ describe('file io', () => {
       id: 'h', name: 'Hole', kind: 'cylinder', position: [10, 10, -1], rotation: [0, 0, 0],
       radius: 3, height: 12, segments: 32, color: '#ff0000', hole: true, visible: true,
     };
-    const plain = exportStl([solid], [solid])!;
-    const cut = exportStl([solid], [solid, hole])!;
+    const plain = exportStl([solid], [solid], [])!;
+    const cut = exportStl([solid], [solid, hole], [])!;
     const triangles = (buf: ArrayBuffer) => new DataView(buf).getUint32(80, true);
     expect(triangles(plain)).toBe(12);
     // The cut part has the box faces split around the hole plus the hole wall.
