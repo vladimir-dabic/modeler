@@ -7,6 +7,7 @@ import { anchorFor, AXIS_VECTORS, dimensionGeometry, MAX_ANNOTATION_TEXT } from 
 import { DxfError, parseDxf } from '../model/dxf';
 import { exportStl, parseDocumentFile } from '../model/io';
 import { exportGlb } from '../model/gltf';
+import { INSTRUCTION_LANGUAGES, resolveInstructions, type Instructions, type InstructionsLanguage } from '../model/instructions';
 import { DRAWING_UNITS, DRAWING_UNIT_MM, localBounds, referenceMatrix } from '../model/references';
 import { cleanNumber, cleanVec, DEG, mirrorEntity, rotateEntityAbout, worldBounds } from '../model/geometry';
 import { commonParentGroup, groupChain, groupMembers } from '../model/groups';
@@ -1163,7 +1164,7 @@ const explodeView = def({
   name: 'explode_view',
   kind: 'host',
   description:
-    'Show the model pulled apart in the app (an exploded view: how the parts fit together). factor 0 = assembled, 1 = fully apart; axis limits it to one direction (e.g. z lifts parts apart vertically). Top-level groups move as units. View only: the model and undo history are untouched.',
+    'Show the model pulled apart in the app (an exploded view: how the parts fit together). factor 0 = assembled, 1 = fully apart; axis limits it to one direction (e.g. z lifts parts apart vertically). Every part comes apart; groups stay together as clusters side by side. View only: the model and undo history are untouched.',
   input: z.strictObject({ factor: z.number().min(0).max(1), axis: Axis.optional() }),
   async runAsync(ctx, input) {
     if (!ctx.host?.setExplode) throw new ApiError('unsupported', 'Only the app has an exploded view', 'Use render_views { explode } in the app, or ask the user to open it and click Connect AI.');
@@ -1476,6 +1477,76 @@ const deleteAnnotations = def({
   },
 });
 
+// ---- build instructions (ADR 0021) ------------------------------------------------------------
+
+const InstructionText = z.string().trim().min(1).max(600);
+
+function instructionsSummary(ctx: OperationContext) {
+  const r = resolveInstructions(ctx.doc.entities, ctx.doc.instructions);
+  const types = new Map(r.parts.map((t) => [t.letter, t]));
+  return {
+    title: r.title,
+    ...(r.intro ? { intro: r.intro } : {}),
+    language: r.language,
+    suggested: r.suggested,
+    size_mm: r.size,
+    parts: r.parts.map((t) => ({ letter: t.letter, name: t.name, qty: t.quantity, t_w_l: t.dims, ids: t.ids })),
+    steps: r.steps.map((s) => ({
+      n: s.number,
+      add: s.letters.map((l) => `${l.count}×${l.letter} ${types.get(l.letter)!.name}`).join(', '),
+      ...(s.text ? { text: s.text } : {}),
+    })),
+    ...(r.warnings.length ? { warnings: r.warnings } : {}),
+    ...(r.suggested ? { hint: 'These steps are suggested bottom-up. Store a better order with a short text per step using set_instructions.' } : {}),
+  };
+}
+
+const getInstructions = def({
+  name: 'get_instructions',
+  kind: 'read',
+  description:
+    'The build-instructions booklet (IKEA style) the app prints: identical parts lettered A, B, C… with quantities and sizes (mm), and the assembly steps (stored, or suggested bottom-up). The user opens it with the Instructions button.',
+  input: z.strictObject({}),
+  run(ctx) {
+    return instructionsSummary(ctx);
+  },
+});
+
+const setInstructions = def({
+  name: 'set_instructions',
+  kind: 'write',
+  description:
+    'Write the build instructions: title, a short intro, language of the booklet headings (en, sr) and the assembly steps in order. Each step adds parts (a target, e.g. { name: "Leg*" }) with a short, plain-language text for a non-expert ("Screw the four legs B into the corners of the top A, 2 screws each."). Parts missing from every step are added as a last step. Only given fields change; steps: null goes back to suggested steps.',
+  input: z.strictObject({
+    title: z.string().trim().min(1).max(120).optional(),
+    intro: InstructionText.nullable().optional().describe('One or two sentences under the title; null removes it'),
+    language: z.enum(INSTRUCTION_LANGUAGES as [InstructionsLanguage, ...InstructionsLanguage[]]).optional().describe('Language of the booklet headings; write texts in the same language'),
+    steps: z
+      .array(z.strictObject({ parts: Target.optional().describe('Parts added in this step (omit for a text-only step, e.g. "Turn it over")'), text: InstructionText.optional() }))
+      .min(1)
+      .max(60)
+      .nullable()
+      .optional(),
+  }),
+  run(ctx, input) {
+    const next: Instructions = { ...(ctx.doc.instructions ?? {}) };
+    if (input.title !== undefined) next.title = input.title;
+    if (input.intro === null) delete next.intro;
+    else if (input.intro !== undefined) next.intro = input.intro;
+    if (input.language !== undefined) next.language = input.language;
+    if (input.steps === null) delete next.steps;
+    else if (input.steps) {
+      next.steps = input.steps.map((s, i) => {
+        if (!s.parts && !s.text) throw new ApiError('invalid_input', `Step ${i + 1} has neither parts nor text`, undefined, `steps.${i}`);
+        const parts = s.parts ? ctx.resolve(s.parts).filter((e) => !e.hole).map((e) => e.id) : [];
+        return { parts, ...(s.text ? { text: s.text } : {}) };
+      });
+    }
+    ctx.doc.setInstructions(Object.keys(next).length ? next : null);
+    return instructionsSummary(ctx);
+  },
+});
+
 // ---- reference drawings (ADR 0014) ----------------------------------------------------------
 
 const DrawingUnitSchema = z.enum(DRAWING_UNITS as [DrawingUnit, ...DrawingUnit[]]);
@@ -1699,6 +1770,8 @@ export const OPERATIONS: OperationDef<any>[] = [
   saveFile,
   exportStlOp,
   exportModel,
+  getInstructions,
+  setInstructions,
   addNote,
   addDimension,
   dimensionParts,

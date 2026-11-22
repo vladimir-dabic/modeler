@@ -868,7 +868,7 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   const before = await snapshot();
   await tab.click('button:has-text("Explode")');
   const on = await snapshot();
-  check('Explode lifts the lamp off; the cabinet stays on the floor (view only)', on.lamp[2] > before.lamp[2] + 100 && on.left[2] === before.left[2] && JSON.stringify(on.model) === JSON.stringify(before.model) && on.version === before.version, JSON.stringify({ before, on }));
+  check('Explode takes every board apart and lifts the lamp off, on the floor (view only)', on.left[0] < before.left[0] - 100 && on.lamp[2] > before.lamp[2] && on.left[2] === before.left[2] && JSON.stringify(on.model) === JSON.stringify(before.model) && on.version === before.version, JSON.stringify({ before, on }));
   check('exploded look: no grid/axes/bed, studio background', !on.gridShown && on.studio && before.gridShown && !before.studio, JSON.stringify({ before: [before.gridShown, before.studio], on: [on.gridShown, on.studio] }));
   // Look only: Delete, ⌘Z and the Properties panel refuse to edit.
   await tab.evaluate(() => window.modeler.doc.setSelection([window.modeler.doc.entities.find((e) => e.name === 'Lamp').id]));
@@ -878,23 +878,71 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   const sidebarText = await tab.textContent('.sidebar');
   check('exploded view is look-only (Delete, undo, Properties)', locked.parts === before.parts && locked.version === before.version && sidebarText.includes('look only') && (await tab.isDisabled('button[aria-label="Undo"]')), JSON.stringify({ parts: locked.parts, version: locked.version }));
   await tab.evaluate(() => window.modeler.doc.clearSelection());
-  check('the cabinet moves as one unit', on.left[2] - before.left[2] === on.top[2] - before.top[2], JSON.stringify({ before, on }));
   await tab.locator('.explode-slider').fill('100');
   const more = await snapshot();
-  check('the slider spreads it further', more.lamp[2] > on.lamp[2] && more.factor === 1, JSON.stringify(more));
-  // Open the cabinet: now its boards come apart.
+  check('the slider spreads it further', more.left[0] < on.left[0] && more.lamp[2] > on.lamp[2] && more.factor === 1, JSON.stringify(more));
+  // Open the cabinet: only its boards come apart; the lamp stays.
   await tab.evaluate(() => {
     const app = window.modeler;
     app.doc.setOpenGroup(app.doc.groups[0].id);
     app.viewport.zoomExtents();
   });
   const opened = await snapshot();
-  check('inside an open group, its parts come apart', opened.left[0] < before.left[0] - 100 && opened.top[2] > before.top[2] + 100 && opened.lamp[2] === before.lamp[2], JSON.stringify(opened));
+  check('inside an open group, only its parts come apart', opened.left[0] < before.left[0] - 100 && JSON.stringify(opened.lamp) === JSON.stringify(before.lamp), JSON.stringify(opened));
   await tab.screenshot({ path: `${outDir}/modeler-explode.png` });
   await tab.evaluate(() => window.modeler.doc.setOpenGroup(null));
   await tab.keyboard.press('b');
   const back = await snapshot();
   check('a drawing tool puts it back together, grid and all', back.factor === 0 && JSON.stringify(back.lamp) === JSON.stringify(before.lamp) && back.version === before.version && back.gridShown && !back.studio, JSON.stringify(back));
+  await tab.close();
+}
+
+// 24. Build instructions (ADR 0021): the booklet from the toolbar, edited in place, follows the model.
+{
+  const tab = await browser.newPage({ viewport: { width: 1300, height: 900 } });
+  tab.on('pageerror', (e) => errors.push(`instructions tab pageerror: ${e.message}`));
+  await tab.bringToFront();
+  await tab.goto(URL);
+  await tab.waitForFunction(() => window.modeler);
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true);
+    app.api.call('apply_operations', { label: 'Coffee table', operations: [
+      { name: 'add_box', input: { name: 'Top', size: [1000, 600, 25], position: [0, 0, 400], color: '#c8a165' } },
+      { name: 'add_box', input: { name: 'Leg', size: [50, 50, 400], position: [30, 30, 0], color: '#8b5a2b' }, as: 'leg' },
+      { name: 'duplicate', input: { target: { ids: ['$leg'] }, pattern: { grid: { counts: [2, 2, 1], step: [890, 490, 0] } } } },
+      { name: 'add_box', input: { name: 'Shelf', size: [890, 490, 18], position: [55, 55, 120], color: '#c8a165' } },
+    ] });
+  });
+  await tab.getByRole('button', { name: /^Build instructions/ }).click();
+  await tab.waitForSelector('.ins-page');
+  const booklet = () => tab.evaluate(() => ({
+    pages: document.querySelectorAll('.ins-page').length,
+    steps: document.querySelectorAll('.ins-step').length,
+    letters: [...document.querySelectorAll('.ins-part .ins-letter')].map((e) => e.textContent).join(''),
+    images: [...document.querySelectorAll('.ins-page img')].every((img) => img.complete && img.naturalWidth > 0),
+    firstStep: document.querySelector('.ins-step-text')?.textContent || document.querySelector('.ins-step-text')?.getAttribute('data-placeholder'),
+  }));
+  let b = await booklet();
+  // Cover, parts, 3 steps on 2 pages, done.
+  check('Instructions opens a booklet: cover, lettered parts, steps with pictures', b.pages === 5 && b.steps === 3 && b.letters === 'ABC' && b.images && b.firstStep === 'Add 4 × A (Leg).', JSON.stringify(b));
+  await tab.screenshot({ path: `${outDir}/modeler-instructions.png` });
+  // Typing over a suggested step stores the steps (one undo step); Delete doesn't reach the model.
+  await tab.keyboard.press('Delete');
+  const text = tab.locator('.ins-step-text').first();
+  await text.click();
+  await text.fill('Screw the four legs A to the shelf.');
+  await tab.keyboard.press('Enter');
+  await tab.waitForTimeout(300);
+  const stored = await tab.evaluate(() => ({ parts: window.modeler.doc.entities.length, label: window.modeler.doc.undoLabel, text: window.modeler.doc.instructions?.steps?.[0]?.text }));
+  b = await booklet();
+  check('a step text edited in the booklet is stored as one undo step', stored.parts === 6 && stored.label === 'Step 1 text' && stored.text === 'Screw the four legs A to the shelf.' && b.firstStep === stored.text, JSON.stringify({ stored, b }));
+  await tab.evaluate(() => window.modeler.api.call('set_instructions', { language: 'sr' }));
+  await tab.waitForTimeout(400);
+  const kicker = await tab.locator('.ins-kicker').textContent();
+  check('the open booklet follows API changes (language)', kicker === 'Uputstvo za izradu', kicker);
+  await tab.keyboard.press('Escape');
+  check('Escape closes the booklet', (await tab.locator('.ins-overlay').count()) === 0);
   await tab.close();
 }
 

@@ -49,6 +49,8 @@ All lengths are millimetres, angles degrees, world Z-up. Write operations return
 | [`save_file`](#save_file) | needs a host capability (async) |
 | [`export_stl`](#export_stl) | needs a host capability (async) |
 | [`export_model`](#export_model) | needs a host capability (async) |
+| [`get_instructions`](#get_instructions) | read (no change) |
+| [`set_instructions`](#set_instructions) | write (one undo step) |
 | [`add_note`](#add_note) | write (one undo step) |
 | [`add_dimension`](#add_dimension) | write (one undo step) |
 | [`dimension_parts`](#dimension_parts) | write (one undo step) |
@@ -518,7 +520,7 @@ Render PNG images of the model from standard views to check shape and alignment 
 
 *needs a host capability (async)*
 
-Show the model pulled apart in the app (an exploded view: how the parts fit together). factor 0 = assembled, 1 = fully apart; axis limits it to one direction (e.g. z lifts parts apart vertically). Top-level groups move as units. View only: the model and undo history are untouched.
+Show the model pulled apart in the app (an exploded view: how the parts fit together). factor 0 = assembled, 1 = fully apart; axis limits it to one direction (e.g. z lifts parts apart vertically). Every part comes apart; groups stay together as clusters side by side. View only: the model and undo history are untouched.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -567,6 +569,27 @@ Write the model for other 3D programs: GLB (binary glTF) for SketchUp (File > Im
 | `path` | string | yes | Must end in .glb |
 | `format` | "glb" |  | Default: from the file extension |
 | `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } |  | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
+
+## get_instructions
+
+*read (no change)*
+
+The build-instructions booklet (IKEA style) the app prints: identical parts lettered A, B, C… with quantities and sizes (mm), and the assembly steps (stored, or suggested bottom-up). The user opens it with the Instructions button.
+
+No input.
+
+## set_instructions
+
+*write (one undo step)*
+
+Write the build instructions: title, a short intro, language of the booklet headings (en, sr) and the assembly steps in order. Each step adds parts (a target, e.g. { name: "Leg*" }) with a short, plain-language text for a non-expert ("Screw the four legs B into the corners of the top A, 2 screws each."). Parts missing from every step are added as a last step. Only given fields change; steps: null goes back to suggested steps.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `title` | string |  |  |
+| `intro` | string \| null |  | One or two sentences under the title; null removes it |
+| `language` | "en" \| "sr" |  | Language of the booklet headings; write texts in the same language |
+| `steps` | { parts, text }[] \| null |  |  |
 
 ## add_note
 

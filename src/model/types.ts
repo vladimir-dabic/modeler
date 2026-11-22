@@ -1,3 +1,4 @@
+import type { Instructions } from './instructions';
 import type { PrinterSetting, WorkspaceId } from './workspaces';
 
 /**
@@ -194,4 +195,6 @@ export interface DocumentFile {
   groups?: Group[];
   references?: ReferenceFile[];
   annotations?: Annotation[];
+  /** Build instructions (ADR 0021). */
+  instructions?: Instructions;
 }

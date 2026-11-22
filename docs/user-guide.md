@@ -119,7 +119,7 @@ Right after finishing an operation, typing a new value **changes that last opera
 ### Exploded view
 
 **Explode** in the top bar (`X`) pulls the model apart, so you can see every piece and how it fits together. The base stays on the floor and the other parts rise and spread above it, on a clean background (no grid, axes, bed or plans):
-- **What moves together:** groups move as one unit, so a cabinet stays a cabinet next to the lamp on top of it. **Open a group** (double-click) and its own parts come apart: the boards of the cabinet, then the parts of a drawer inside it, level by level.
+- **Every part comes apart:** assemblies (groups) first move apart side by side, then the parts of each one come apart around it. Legs move out, and parts that sit on or inside each other (a top in its rim, a lid on a box) are lifted off one above the other. **Open a group** (double-click) to take only that one apart.
 - **The panel at the top right:** the slider sets how far apart, *All / X / Y / Z* limits the direction (Z just lifts parts up and down), and × puts it back together.
 - **It's only a view.** Nothing moves in the model, there is nothing to undo, and saving and exporting use the assembled model. Notes and dimensions hide while exploded.
 - **Look only:**
@@ -145,6 +145,21 @@ Customisations are saved in the browser.
 
 - **Round edges:** a box's *Round edges* field in Properties rounds every edge and corner (printed enclosures, soft blocks).
 - **Revolved shapes** (vases, cups, knobs, turned legs) and **tubes** (handles, tails, cables, rails: smooth through a list of points, optionally tapering) are created through the API, so ask Claude over MCP, e.g. *"add a cup 90 mm tall"* or *"a handle tube from here to there"*. Once they exist, you can move, rotate, copy, mirror, colour and cut them like any part, and change a tube's diameter in Properties.
+
+## Build instructions
+
+**Instructions** in the toolbar opens an IKEA-style booklet of the model, to build it yourself or send it to a craftsman:
+- a cover with a picture and the overall size;
+- every part with a letter (identical parts share one), a picture, the quantity and its size, plus a cut list table;
+- the assembly steps, with pictures: parts already in place are grey, new ones are in colour with arrows and letters;
+- a "Done!" page.
+
+How to use it:
+- **Print / Save PDF** prints it, or saves it as a PDF to send.
+- **Steps:** until someone writes them, they're suggested bottom-up, one per kind of part. Click any step text (or the title, or the description under it) to change it. `Enter` saves, `Esc` reverts, and every edit can be undone.
+- **With Claude:** ask it to write the steps, e.g. *"write the build instructions in Serbian for a beginner"*. It sets the order and one short sentence per step, and the open booklet updates.
+- **Language:** the headings can be English or Srpski (the language menu).
+- **Names:** name your parts well ("Leg", "Shelf"), because the names appear in the booklet.
 
 ## Notes and dimensions
 

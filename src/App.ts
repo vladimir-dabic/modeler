@@ -47,6 +47,7 @@ import { h, isTextInput } from './ui/dom';
 import { icon } from './ui/icons';
 import { ProjectFiles, type OpenedFile, type FileHandle } from './ui/ProjectFiles';
 import { ContextMenu, type MenuItem } from './ui/ContextMenu';
+import { InstructionsView } from './ui/InstructionsView';
 import { ShortcutsDialog } from './ui/ShortcutsDialog';
 import { Sidebar } from './ui/Sidebar';
 import { Snapper } from './viewport/Snapper';
@@ -98,6 +99,8 @@ export class App {
   private readonly toolButtons = new Map<ToolId, HTMLButtonElement>();
   readonly keymap = new Keymap(COMMANDS, safeStorage());
   private readonly shortcuts: ShortcutsDialog;
+  private readonly instructions: InstructionsView;
+  private instructionsTimer = 0;
   private readonly contextMenu = new ContextMenu();
   /** Buttons whose tooltip shows a (customisable) shortcut. */
   private readonly titled: { el: HTMLElement; label: string; command: string }[] = [];
@@ -214,6 +217,7 @@ export class App {
         btn('save', 'Save project', 'file.save'),
         btn('export', 'Export STL for 3D printing (selection, or everything)', 'file.exportStl', 'STL'),
         btn('export', 'Export GLB for SketchUp, Blender and renderers (selection, or everything)', 'file.exportGlb', 'GLB'),
+        btn('book', 'Build instructions: an IKEA-style booklet with parts, cut list and steps, to print or save as PDF', 'file.instructions', 'Instructions'),
       ),
       h('div', { class: 'tb-group' }, undo, redo),
       h('div', { class: 'tb-group views' },
@@ -242,6 +246,12 @@ export class App {
 
     // ---- core ----
     this.viewport = new Viewport(vpEl, this.doc);
+    this.instructions = new InstructionsView({
+      doc: this.doc,
+      renderer: this.viewport.renderer,
+      name: () => this.files.name,
+      call: (name, input, label) => this.uiCall(name, input, label).ok,
+    });
     this.viewport.showCuts = this.settings.showCuts;
     this.snapper = new Snapper(this.viewport, this.doc, this.settings);
     this.api = new ModelerApi(this.doc, {
@@ -334,6 +344,11 @@ export class App {
       if (ev.committed) {
         this.dirty = true;
         this.scheduleAutosave();
+        // An open booklet follows the model (e.g. Claude rewrote the steps).
+        if (this.instructions.isOpen) {
+          clearTimeout(this.instructionsTimer);
+          this.instructionsTimer = window.setTimeout(() => this.instructions.refresh(), 120);
+        }
       }
       this.updateChrome();
     });
@@ -763,6 +778,7 @@ export class App {
       'file.saveAs': () => void this.save(true),
       'file.exportStl': () => this.exportStl(),
       'file.exportGlb': () => this.exportGlb(),
+      'file.instructions': () => (this.instructions.isOpen ? this.instructions.close() : this.instructions.open()),
       'file.importDxf': () => void this.importDxf(),
       'file.exportCutList': () => this.exportCutList(),
       'help.shortcuts': () => this.shortcuts.toggle(),
@@ -837,6 +853,8 @@ export class App {
   private bindKeyboard() {
     window.addEventListener('keydown', (e) => {
       if (this.shortcuts.isOpen) return; // the dialog handles its own keys
+      // The booklet is a page over the app: only undo/redo reach the model.
+      if (this.instructions.isOpen && !((e.metaKey || e.ctrlKey) && /^[zy]$/i.test(e.key))) return;
       if (e.target === this.els.vcb) return; // handled by the measurement box
       if (isTextInput(e.target)) return;
 

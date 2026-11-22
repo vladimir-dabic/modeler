@@ -5,6 +5,7 @@ import { buildWorldGeometries, fuseGeometries } from './csg';
 import { newId } from './Document';
 import { pruneGroups } from './groups';
 import { parseAnnotation, pruneAnnotations } from './annotations';
+import { parseInstructions } from './instructions';
 import { parseReferenceFile } from './references';
 import type { DocumentFile, Entity, Group, ReferenceFile, Unit, Vec2, Vec3 } from './types';
 import { DEFAULT_PRINTER_SETTING, isWorkspaceId, PRINTERS, type PrinterSetting, type WorkspaceId } from './workspaces';
@@ -108,6 +109,7 @@ export function parseDocumentFile(text: string): DocumentFile {
   });
   const byId = new Map(entities.map((e) => [e.id, e]));
   const annotations = pruneAnnotations(parsedAnnotations, (id) => byId.get(id));
+  const instructions = parseInstructions(raw.instructions);
   return {
     format: 'modeler',
     version: 1,
@@ -118,6 +120,7 @@ export function parseDocumentFile(text: string): DocumentFile {
     groups: pruneGroups(entities, groups),
     ...(references.length ? { references } : {}),
     ...(annotations.length ? { annotations } : {}),
+    ...(instructions ? { instructions } : {}),
   };
 }
 

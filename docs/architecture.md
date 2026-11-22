@@ -87,6 +87,10 @@ Imported plans (DXF) to trace and snap to. They are **not part of the model**: n
 - `src/model/dxf.ts` parses ASCII DXF into that geometry. `src/model/references.ts` has the placement matrix (`referenceMatrix`: drawing units → mm, rotate, translate), bounds, snap points and file validation.
 - The viewport draws each drawing as one `LineSegments` (rebuilt only when layers change; placement is a matrix). The snapper adds its corners, segment midpoints and arc/circle centres.
 
+### Build instructions ([ADR 0021](adr/0021-build-instructions-booklet.md))
+
+Build instructions live in `doc.instructions`: only the title, intro, language and step order with texts. Letters, quantities and pictures are derived when the booklet opens (`src/model/instructions.ts`, `src/viewport/InstructionImages.ts`, `src/ui/InstructionsView.ts`).
+
 ### Annotations ([ADR 0015](adr/0015-annotations-notes-and-dimensions.md))
 
 Notes and dimensions in `doc.annotations`. They're snapshotted (one undo step per change), saved in the file, never geometry.
@@ -218,6 +222,7 @@ src/
     dxf.ts              ASCII DXF → reference-drawing geometry (blocks, bulges, OCS)
     references.ts       reference drawings: placement matrix, bounds, snap points, validation
     annotations.ts      notes/dimensions: anchors, dimension geometry, pruning, validation
+    instructions.ts     build-instructions booklet: part letters, suggested/stored steps (ADR 0021)
     shapes.ts           meshes for rounded boxes, spheres, revolves, tubes; outward-winding check
     explode.ts          exploded-view offsets per unit (display only)
     workspaces.ts       workspace configs, printers, fit check, volume

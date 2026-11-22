@@ -57,6 +57,7 @@ export const COMMANDS: CommandDef[] = [
   { id: 'file.importDxf', label: 'Import DXF drawing (reference)…', category: 'File', keys: [] },
   { id: 'file.exportStl', label: 'Export STL', category: 'File', keys: ['Mod+E'] },
   { id: 'file.exportGlb', label: 'Export GLB (SketchUp, Blender, renderers)', category: 'File', keys: [] },
+  { id: 'file.instructions', label: 'Build instructions (booklet to print or send)…', category: 'File', keys: [] },
   { id: 'file.exportCutList', label: 'Export cut list (CSV)', category: 'File', keys: [] },
 
   { id: 'workspace.print', label: 'Print workspace (3D printing)', category: 'Workspace', keys: [] },

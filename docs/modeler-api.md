@@ -96,7 +96,7 @@ type Target =
 
 ## Views
 
-- `explode_view { factor 0–1, axis? }` (host, app only) shows the model pulled apart, with groups as units. View state only: no undo step, nothing saved.
+- `explode_view { factor 0–1, axis? }` (host, app only) shows the model pulled apart: every part, assemblies (groups) kept side by side as clusters ([ADR 0022](adr/0022-exploded-view-all-parts.md)). View state only: no undo step, nothing saved.
 - `render_views { views?, size?, explode?, explode_axis? }` can render exploded images without changing the user's view.
 
 ## Printing
@@ -105,6 +105,10 @@ type Target =
 - `split_for_print { target, axis?, at?, gap?, pegs?, peg_diameter?, peg_depth?, clearance?, name? }` replaces the target with two parametric pieces with pegs and clearance holes. The result lists the pieces, the peg count and size, and `notes` if pegs had to shrink or didn't fit.
 - `export_model` writes GLB for other 3D programs: separate named parts (not fused), groups as nested nodes, metres Y-up ([ADR 0020](adr/0020-glb-export-own-writer.md)).
 - `export_stl` writes one fused, watertight solid. The `check_print` / `get_quantities` totals count overlapping parts once.
+
+## Build instructions
+
+- `get_instructions` / `set_instructions { title?, intro?, language?, steps? }` ([ADR 0021](adr/0021-build-instructions-booklet.md)). Letters, quantities and pictures are derived from the model; only the title, intro, language and step order with texts are stored. A step is `{ parts?: target, text? }`; `steps: null` goes back to the suggested bottom-up steps.
 
 ## Annotations
 
