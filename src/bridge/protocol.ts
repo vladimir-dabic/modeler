@@ -12,6 +12,8 @@ export const BRIDGE_PROTOCOL = 1;
 
 /** The fixed local port the server listens on and the app dials (override: `--port` / `?aiPort=`). */
 export const DEFAULT_BRIDGE_PORT = 47830;
+/** When the MCP server also serves the app (ADR 0026), it answers here with { app, protocol, port }. */
+export const BRIDGE_INFO_PATH = '/modeler-bridge.json';
 
 /** Server → tab. */
 export type BridgeRequest =

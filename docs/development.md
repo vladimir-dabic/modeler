@@ -22,6 +22,14 @@ npm run dev          # http://localhost:5173 (hot reload)
 
 `window.modeler` is the live `App` instance in the browser console. It's useful for debugging (`modeler.doc.entities`, `modeler.viewport.zoomExtents()`) and is what the smoke test uses.
 
+## Packaging and release ([ADR 0026](adr/0026-one-repo-mcp-package-serves-the-app.md))
+
+One repo, one product version (`mcp/package.json`). The npm package `modeler-mcp` is the MCP server with the built app inside, served on the bridge port.
+
+- `npm run serve`: build the app and the server, and run it the way users do (http://127.0.0.1:47830).
+- `npm run check:pack`: pack the tarball and test it from an empty folder (MCP tools and version, safe static serving, the served app connects and receives calls).
+- `npm run release:mcp`: publish (bump the version first). Publishing is public, so it is done by hand.
+
 ## Testing strategy
 
 | Layer | How it's tested |

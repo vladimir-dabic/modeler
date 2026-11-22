@@ -40,13 +40,18 @@ export class BridgeClient {
   private socket: SocketLike | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private _status: BridgeStatus = 'off';
-  readonly url: string;
+  url: string;
 
   constructor(
     private readonly api: ModelerApi,
     private readonly opts: BridgeClientOptions = {},
   ) {
     this.url = `ws://127.0.0.1:${opts.port ?? DEFAULT_BRIDGE_PORT}`;
+  }
+
+  /** Dial another port (the app learned it from the server that serves it). */
+  setPort(port: number) {
+    this.url = `ws://127.0.0.1:${port}`;
   }
 
   get status(): BridgeStatus {

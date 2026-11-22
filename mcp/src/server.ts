@@ -9,7 +9,9 @@ import { parseDocumentFile } from '../../src/model/io';
 import type { BridgeServer } from './bridge';
 import type { NodeFileHost } from './files';
 
-export const SERVER_VERSION = '0.1.0';
+// Set by mcp/build.mjs from mcp/package.json (ADR 0026); tests run the sources directly.
+declare const __MODELER_VERSION__: string | undefined;
+export const SERVER_VERSION = typeof __MODELER_VERSION__ === 'string' ? __MODELER_VERSION__ : '0.0.0-dev';
 
 /** Operations that run in Node even in live mode (they touch files; the tab never does). */
 const FILE_OPS = new Set(['open_file', 'save_file', 'export_stl', 'export_model', 'import_dxf']);
@@ -36,7 +38,7 @@ export interface ModelerServerOptions {
   /** Human-readable bridge state for connection_status, e.g. "listening on ws://127.0.0.1:47830". */
   bridgeStatus: string;
   /** When this server was built, and whether newer code is waiting (checked on each status call). */
-  buildInfo?: () => { built: string; update_available?: string };
+  buildInfo?: () => { built?: string; update_available?: string };
 }
 
 function labelFor(name: string, input: unknown): string {

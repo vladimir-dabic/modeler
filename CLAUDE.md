@@ -2,6 +2,8 @@
 
 SketchUp-style browser modeler (Vite + TS + Three.js, no UI framework). **Read [docs/README.md](docs/README.md) first.** Architecture: [docs/architecture.md](docs/architecture.md). Decisions: [docs/adr/](docs/adr/README.md).
 
+**Local-only docs:** `docs/adr/` (decisions) and `docs/roadmap.md` (plans) are git-ignored; they live on the maintainer's machine and are not in the repo or its history. Keep writing ADRs there as before; links to them from the other docs resolve only locally.
+
 Audience: hobbyists, home makers and semi-pros who prompt Claude from an idea to a build. Not a SketchUp competitor: make it buildable (parts, hardware, checks, cut list, drawings) before making it richer ([ADR 0024](docs/adr/0024-product-focus-prompt-first-making.md)).
 
 ## Guiding principle: the modeler is an API

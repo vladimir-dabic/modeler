@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { ModelerApi, type ApiResult } from './api';
 import { BridgeClient, type BridgeStatus } from './bridge/BridgeClient';
+import { BRIDGE_INFO_PATH } from './bridge/protocol';
 import { activeCsgEngine, type CsgEngine } from './model/csg';
 import { exportGlb } from './model/gltf';
 import { copyParts, parseClip } from './model/clipboard';
@@ -282,6 +283,15 @@ export class App {
       },
       onModelChange: (label) => this.toast(label),
     });
+    // Served by the MCP server itself (ADR 0026)? Then its bridge is on that same server.
+    if (!new URLSearchParams(location.search).get('aiPort')) {
+      void fetch(BRIDGE_INFO_PATH, { cache: 'no-store' })
+        .then((r) => (r.ok && r.headers.get('content-type')?.includes('application/json') ? r.json() : null))
+        .then((info: { app?: string; port?: number } | null) => {
+          if (info?.app === 'modeler' && typeof info.port === 'number') this.bridge.setPort(info.port);
+        })
+        .catch(() => {});
+    }
 
     const ctx: ToolContext = {
       doc: this.doc,

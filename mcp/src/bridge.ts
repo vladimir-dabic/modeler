@@ -1,10 +1,11 @@
 /// <reference types="node" />
-import type { IncomingMessage } from 'node:http';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { ApiResult } from '../../src/api/core';
 import type { DocumentFile } from '../../src/model/types';
 import {
+  BRIDGE_INFO_PATH,
   BRIDGE_PROTOCOL,
   CLOSE_PROTOCOL,
   CLOSE_REPLACED,
@@ -13,6 +14,7 @@ import {
   type BridgeWelcome,
   type TabFile,
 } from '../../src/bridge/protocol';
+import { LOCAL_HOST, serveStatic } from './static';
 
 /** Origins of the app allowed to connect by default (Vite dev and preview). */
 export const DEFAULT_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173'];
@@ -21,6 +23,8 @@ export interface BridgeServerOptions {
   port: number;
   /** Exact `Origin` values allowed to connect (ADR 0013). */
   origins: string[];
+  /** Serve the built web app from this folder on the same port (ADR 0026). */
+  appDir?: string;
   /** How long a request may take in the tab (render_views on a big model can be slow). */
   timeoutMs?: number;
   log?: (msg: string) => void;
@@ -43,6 +47,7 @@ const MAX_MESSAGE = 32 * 1024 * 1024;
  */
 export class BridgeServer {
   private wss: WebSocketServer | null = null;
+  private http: Server | null = null;
   private tab: WebSocket | null = null;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
@@ -59,32 +64,52 @@ export class BridgeServer {
   }
 
   get port(): number | undefined {
-    return (this.wss?.address() as AddressInfo | undefined)?.port;
+    return (this.http?.address() as AddressInfo | undefined)?.port;
   }
 
   /** Listen on 127.0.0.1. Rejects if the port is taken (e.g. another MCP server owns it). */
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
+      // One port for both: plain HTTP serves the app (when packaged with it), and the
+      // WebSocket upgrade is the bridge.
+      const appDir = this.opts.appDir;
+      const http = createServer((req, res) => {
+        // The app served from here asks which port its bridge is on (it may not be the default).
+        if (req.url === BRIDGE_INFO_PATH && LOCAL_HOST.test(req.headers.host ?? '')) {
+          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ app: 'modeler', protocol: BRIDGE_PROTOCOL, port: this.port }));
+          return;
+        }
+        if (appDir) serveStatic(appDir, req, res);
+        else res.writeHead(404, { 'content-type': 'text/plain' }).end('Modeler MCP bridge. Open the modeler app and click Connect AI.');
+      });
       const wss = new WebSocketServer({
-        host: '127.0.0.1',
-        port: this.opts.port,
+        server: http,
         maxPayload: MAX_MESSAGE,
         verifyClient: (info: { origin: string; req: IncomingMessage }) => this.allowed(info.origin, info.req),
       });
-      wss.once('listening', () => {
+      wss.on('connection', (socket) => this.accept(socket));
+      http.once('error', reject);
+      http.listen(this.opts.port, '127.0.0.1', () => {
+        this.http = http;
         this.wss = wss;
         resolve();
       });
-      wss.once('error', reject);
-      wss.on('connection', (socket) => this.accept(socket));
     });
   }
 
   close(): Promise<void> {
     this.dropTab('server closing');
     const wss = this.wss;
+    const http = this.http;
     this.wss = null;
-    return new Promise((resolve) => (wss ? wss.close(() => resolve()) : resolve()));
+    this.http = null;
+    return new Promise((resolve) => {
+      if (!wss || !http) return resolve();
+      wss.close(() => {
+        http.closeAllConnections?.();
+        http.close(() => resolve());
+      });
+    });
   }
 
   /** Run an API operation in the tab. */
@@ -107,7 +132,7 @@ export class BridgeServer {
   private allowed(origin: string | undefined, req: IncomingMessage): boolean {
     // The Host check stops DNS-rebinding pages; the Origin check stops every other web page.
     const host = req.headers.host ?? '';
-    const okHost = /^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host);
+    const okHost = LOCAL_HOST.test(host);
     const okOrigin = !!origin && this.opts.origins.includes(origin);
     if (!okHost || !okOrigin) this.log(`refused bridge connection (origin ${origin ?? 'none'}, host ${host})`);
     return okHost && okOrigin;

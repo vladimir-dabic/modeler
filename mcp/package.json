@@ -1,0 +1,20 @@
+{
+  "name": "modeler-mcp",
+  "version": "0.2.0",
+  "description": "Modeler, a prompt-first 3D modeler for makers: the web app plus an MCP server so Claude (or any MCP client) can model in it.",
+  "type": "module",
+  "bin": {
+    "modeler-mcp": "dist/modeler-mcp.mjs"
+  },
+  "files": [
+    "dist/modeler-mcp.mjs",
+    "dist/manifold.wasm",
+    "dist/app",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": ["mcp", "model-context-protocol", "3d", "cad", "modeler", "woodworking", "3d-printing", "claude"],
+  "license": "UNLICENSED"
+}

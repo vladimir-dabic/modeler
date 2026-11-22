@@ -30,3 +30,7 @@ Thumbs.db
 
 # Local Claude Code settings (shared settings in .claude/settings.json are fine to commit)
 .claude/settings.local.json
+
+# Odluke (ADR) i plan rade samo lokalno; nisu u gitu
+docs/adr/
+docs/roadmap.md

@@ -2,6 +2,28 @@
 
 An MCP server that lets Claude (Claude Code, Claude Desktop, or any MCP client) model in Modeler. It exposes every [Modeler API](../docs/api-reference.md) operation as an MCP tool, with the same names, JSON Schemas and descriptions, plus `connection_status`. Design: [docs/ai-integration.md](../docs/ai-integration.md), decisions: [ADR 0013](../docs/adr/0013-mcp-server-bridge-and-files.md).
 
+## Install (users)
+
+The package `modeler-mcp` contains the server **and the web app** (ADR 0026). Node 20 or newer.
+
+**Claude Code:**
+
+```bash
+claude mcp add -s user modeler -- npx -y modeler-mcp --root "$HOME/Models"
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+
+```json
+{ "mcpServers": { "modeler": { "command": "npx", "args": ["-y", "modeler-mcp", "--root", "/Users/you/Models"] } } }
+```
+
+**Other MCP clients** (Cursor, VS Code, Windsurf, Zed, Gemini CLI, Codex CLI…) use the same command: `npx -y modeler-mcp --root <folder>`. Most of them take the same `mcpServers` JSON as above.
+
+Then open **http://127.0.0.1:47830** (the app, served by the server your AI client started), click **Connect AI**, and ask, e.g. *"build a coffee table 90×60 with a steel frame"*.
+
+Web chat apps (claude.ai, ChatGPT in the browser) need a remote MCP server; that is on the roadmap.
+
 ## Two modes
 
 | | Live | Headless |
@@ -13,7 +35,7 @@ An MCP server that lets Claude (Claude Code, Claude Desktop, or any MCP client) 
 
 File paths are relative to the server's **working folder** (`--root`, default: the folder it was started in). Paths outside it are refused. Only `.json` project files, `.stl` and `.glb` files are written; `.dxf` files are read by `import_dxf`.
 
-## Build
+## Build (from the repo)
 
 You don't need to build by hand: `mcp/run.mjs` (what Claude runs) rebuilds the bundle by itself when the code changed, then starts it. To build explicitly:
 
@@ -22,7 +44,7 @@ npm install
 npm run build:mcp      # → mcp/dist/modeler-mcp.mjs + manifold.wasm (the geometry engine; keep them together)
 ```
 
-## Set up Claude Code
+## Set up Claude Code from the repo (development)
 
 From the repo folder:
 
@@ -81,8 +103,8 @@ claude mcp add -s user modeler -- node /Users/you/dev/AI/modeler/mcp/run.mjs --r
 | Option | Env variable | Default | |
 |---|---|---|---|
 | `--root DIR` | `MODELER_ROOT` | current folder | working folder for files |
-| `--port N` | `MODELER_BRIDGE_PORT` | 47830 | live-bridge port. If you change it, open the app with `?aiPort=N` |
-| `--origin URL` (repeatable) | `MODELER_ORIGINS` (comma-separated) | `http://localhost:5173`, `http://127.0.0.1:5173`, and the same on 4173 | app origins allowed to connect |
+| `--port N` | `MODELER_BRIDGE_PORT` | 47830 | port of the live bridge and of the served app. The app served by the server finds it by itself; the dev app (5173) needs `?aiPort=N` |
+| `--origin URL` (repeatable) | `MODELER_ORIGINS` (comma-separated) | `http://localhost:5173`, `http://127.0.0.1:5173`, and the same on 4173 | app origins allowed to connect (the served app's own origin is always added), e.g. a hosted app's `https://…` |
 | `--no-bridge` | | | headless only |
 
 Logs go to stderr (stdout carries MCP messages).
@@ -99,8 +121,19 @@ Logs go to stderr (stdout carries MCP messages).
 |---|---|
 | `src/main.ts` | CLI: options, starts the bridge, MCP over stdio |
 | `src/server.ts` | MCP tools ↔ Modeler API; routing between the tab and the headless document |
-| `src/bridge.ts` | WebSocket server: origin/host checks, one tab, request/response |
+| `src/bridge.ts` | HTTP + WebSocket server on one port: the bridge (origin/host checks, one tab, request/response) and the app |
+| `src/static.ts` | serves the packaged app: localhost only, no path escape, wasm type |
 | `src/files.ts` | `NodeFileHost`: file access limited to the working folder |
-| `build.mjs` | esbuild bundle |
+| `build.mjs` | esbuild bundle; `--with-app` copies the built app into `dist/app` |
+| `package.json` | the published package `modeler-mcp` (version = product version) |
 
 The app side is `src/bridge/BridgeClient.ts`, and the message types live in `src/bridge/protocol.ts`. Tests: `tests/mcp.test.ts` (in-process, both modes) and step 17 of `scripts/smoke.mjs` (the built bundle over stdio, driving a real tab).
+
+## Release
+
+```bash
+npm run check:pack    # build app + server, pack the tarball, test it from an empty folder
+npm run release:mcp   # publish to npm (bump the version in mcp/package.json first)
+```
+
+`scripts/pack-check.mjs` runs the unpacked package with no `node_modules`. It checks the MCP tools and version, that the served app is safe (no path escape, localhost only, wasm type), and that the served app connects (Connect AI) and receives calls.

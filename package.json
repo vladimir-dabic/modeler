@@ -11,7 +11,12 @@
     "typecheck": "tsc --noEmit",
     "smoke": "node scripts/smoke.mjs",
     "docs:api": "UPDATE_DOCS=1 vitest run tests/api-reference.test.ts",
-    "mcp": "node mcp/run.mjs"
+    "mcp": "node mcp/run.mjs",
+    "build:release": "npm run build && node mcp/build.mjs --with-app",
+    "serve": "npm run build:release && node mcp/dist/modeler-mcp.mjs --root \"${MODELER_ROOT:-$HOME/Models}\"",
+    "pack:mcp": "npm run build:release && npm pack ./mcp --pack-destination test-results",
+    "check:pack": "npm run pack:mcp && node scripts/pack-check.mjs",
+    "release:mcp": "npm run build:release && npm publish ./mcp"
   },
   "description": "Simple SketchUp-style 3D modeler for 3D printing and woodworking",
   "dependencies": {
