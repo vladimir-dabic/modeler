@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { localBounds, worldBounds } from './geometry';
-import type { Entity } from './types';
+import { bandingText } from './parts';
+import type { EdgeBanding, Entity } from './types';
 
 /**
  * Build instructions (ADR 0021): an IKEA-style booklet made from the model. DOM-free.
@@ -39,6 +40,10 @@ export interface PartType {
   kind: Entity['kind'];
   color: string;
   ids: string[];
+  /** Part properties (ADR 0025), when set. */
+  material?: string;
+  finish?: string;
+  banding?: EdgeBanding;
 }
 
 export interface ResolvedStep {
@@ -104,13 +109,17 @@ export function partTypes(entities: Entity[]): PartType[] {
   for (const e of instructionSolids(entities)) {
     const dims = partDims(e);
     const shape = e.kind === 'box' ? (e.edgeRadius ? `box r${round(e.edgeRadius)}` : 'box') : e.kind === 'extrusion' ? `extrusion ${JSON.stringify(e.points)}` : e.kind;
-    const key = `${dims.join('×')}|${shape}|${e.color.toLowerCase()}`;
+    const banding = bandingText(e.banding);
+    const key = `${dims.join('×')}|${shape}|${e.color.toLowerCase()}|${e.material ?? ''}|${e.finish ?? ''}|${banding}`;
     const t = byKey.get(key);
     if (t) {
       t.quantity++;
       t.ids.push(e.id);
     } else {
-      byKey.set(key, { letter: '', name: baseName(e.name), quantity: 1, dims, kind: e.kind, color: e.color, ids: [e.id] });
+      byKey.set(key, {
+        letter: '', name: baseName(e.name), quantity: 1, dims, kind: e.kind, color: e.color, ids: [e.id],
+        ...(e.material ? { material: e.material } : {}), ...(e.finish ? { finish: e.finish } : {}), ...(banding ? { banding: e.banding } : {}),
+      });
     }
   }
   const list = [...byKey.values()].sort(

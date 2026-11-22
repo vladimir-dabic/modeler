@@ -69,6 +69,10 @@ Two optional fields refine existing kinds: a box's `edgeRadius` (rounded edges a
 
 All kinds share `id`, `name`, `position` (world mm), `rotation` (Euler XYZ, degrees), `color`, `hole`, `visible`, and an optional `groupId`. World units: **mm, Z-up** (X red, Y green, Z blue).
 
+### Components and part properties ([ADR 0025](adr/0025-components-and-part-properties.md))
+
+Entities with the same `component` id are linked copies: they share their definition (every field except name, position, rotation, visibility, group). `syncComponents` (`src/model/parts.ts`) makes the copies follow the one that changed; it runs after every API write and in `ModelDocument.commit`. Optional part properties (`material`, `finish`, `banding`, `partNo`, `note`) are part of the definition and feed the cut list, the booklet's part letters and GLB material names.
+
 ### Groups ([ADR 0011](adr/0011-groups-as-flat-membership.md))
 
 `doc.groups` is a list of `{ id, name, parentId? }`, and an entity names its group with `groupId`. Groups have **no transform**; members keep world positions, so geometry, snapping, CSG and export are unaffected. Pure helpers live in `src/model/groups.ts`:
@@ -159,7 +163,8 @@ Scene helpers:
 
 | What | Where | Key / format |
 |---|---|---|
-| Model (autosave) | `localStorage` | `modeler.autosave.v1`, a `DocumentFile` |
+| Model (autosave) | `localStorage` | `modeler.autosave.v1:<tab id>`, a `DocumentFile`, one per browser tab; index `modeler.tabs.v1` (`src/ui/TabSession.ts`, ADR 0023) |
+| Clipboard fallback | `localStorage` | `modeler.clipboard.v1`, the last copy (the system clipboard has it too) |
 | Project file | Save / Save As / Open / drag-drop: written back in place where the File System Access API exists, else downloaded ([ADR 0016](adr/0016-project-files-save-in-place.md)) | `*.modeler.json`: `{format: 'modeler', version: 1, units, workspace, printer, entities, groups, annotations?, references?}`; each reference carries its `geometry` |
 | Reference drawing source | import / drag-drop | `*.dxf` (ASCII), converted on import; the DXF itself isn't kept |
 | App settings (snap per workspace, cut preview, filament) | `localStorage` | `modeler.settings.v1` |
@@ -218,6 +223,8 @@ src/
     units.ts            parse/format lengths and angles
     cutlist.ts          cut list grouping + CSV
     io.ts               file parse/validate, STL export, autosave, settings
+    clipboard.ts        copy/paste format: copyParts, paste placement, fresh ids (ADR 0023)
+    parts.ts            components (linked copies, syncComponents) and part properties (ADR 0025)
     gltf.ts             GLB export (own DOM-free writer, ADR 0020)
     dxf.ts              ASCII DXF → reference-drawing geometry (blocks, bulges, OCS)
     references.ts       reference drawings: placement matrix, bounds, snap points, validation

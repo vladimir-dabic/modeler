@@ -54,6 +54,9 @@ export class ProjectFiles {
   name = 'Untitled';
   handle: FileHandle | null = null;
 
+  /** IndexedDB key of this tab's current file (TabSession, ADR 0023). */
+  currentKey = 'current';
+
   constructor(private readonly win: PickerWindow = window as unknown as PickerWindow) {}
 
   /** True where Save can write back to the opened file. */
@@ -151,15 +154,17 @@ export class ProjectFiles {
 
   /** Remember which file the autosaved model belongs to. */
   private async storeCurrent() {
-    await idbSet('current', { name: this.name, handle: this.handle });
+    await idbSet(this.currentKey, { name: this.name, handle: this.handle });
   }
 
   /** After a reload restored the autosave: reconnect to its file (permission is asked on the next save). */
-  async restoreCurrent(): Promise<void> {
-    const cur = await idbGet<{ name: string; handle: FileHandle | null }>('current');
+  async restoreCurrent(fromKey = this.currentKey): Promise<void> {
+    const cur = await idbGet<{ name: string; handle: FileHandle | null }>(fromKey);
     if (!cur) return;
     this.name = typeof cur.name === 'string' && cur.name ? cur.name : 'Untitled';
     this.handle = cur.handle ?? null;
+    // Taken over from another tab's slot: now it's ours.
+    if (fromKey !== this.currentKey) await this.storeCurrent();
   }
 }
 

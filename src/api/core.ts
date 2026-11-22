@@ -94,12 +94,14 @@ export function shapeText(e: Entity): string {
   }
 }
 
-/** One line per part, e.g. `k3f9a2 "Shelf 2" box 564×280×18 at 18,0,180 [hole] in "Bookcase"`. */
+/** One line per part, e.g. `k3f9a2 "Shelf 2" box 564×280×18 at 18,0,180 [component c1] material "Oak" in "Bookcase"`. */
 export function entityLine(e: Entity, groups: Group[]): string {
   const parts = [`${e.id} "${e.name}" ${shapeText(e)} at ${v3(e.position)}`];
   if (e.rotation.some((a) => a !== 0)) parts.push(`rot ${v3(e.rotation)}`);
   if (e.hole) parts.push(`[${e.quiet ? 'helper ' : ''}hole${e.holeScope === 'group' ? ', own group only' : ''}]`);
   if (!e.visible) parts.push('[hidden]');
+  if (e.component) parts.push(`[component ${e.component}]`);
+  if (e.material) parts.push(`material "${e.material}"`);
   const g = e.groupId ? groups.find((x) => x.id === e.groupId) : undefined;
   if (g) parts.push(`in "${g.name}"`);
   return parts.join(' ');

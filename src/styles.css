@@ -238,39 +238,96 @@ kbd {
 
 /* ---- workspaces ------------------------------------------------------------ */
 
-.workspace-switch {
-  gap: 0;
-  padding: 2px;
-  margin: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel-2);
-}
-
-.ws-btn {
+.ws-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 28px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
+  height: 24px;
+  margin-left: 8px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--accent);
+  font: inherit;
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
 }
 
-.ws-btn:hover {
-  color: var(--text);
+.ws-chip:hover {
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
 }
 
-.ws-btn.active {
+.ws-chip .caret {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+/* ---- new project dialog ---------------------------------------------------- */
+
+.new-project {
+  width: min(720px, 100%);
+}
+
+.np-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  padding: 8px 16px 4px;
+}
+
+.np-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 16px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
   background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.np-card:hover,
+.np-card:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.np-card.current {
+  border-color: var(--border-strong);
+}
+
+.np-card strong {
+  font-size: 15px;
+}
+
+.np-icon {
   color: var(--accent);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.np-tagline {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.np-note {
+  margin: 8px 16px 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .np-cards {
+    grid-template-columns: 1fr;
+  }
 }
 
 .ws-cards {
@@ -1882,4 +1939,17 @@ kbd {
     background: none;
     box-shadow: none;
   }
+}
+
+/* ---- part properties (ADR 0025) ---------------------------------------------------- */
+
+.banding {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.field.text-field {
+  text-align: left;
+  font-family: var(--font);
 }

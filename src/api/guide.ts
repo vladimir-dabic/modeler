@@ -12,6 +12,7 @@ How to work:
 - Express a whole intent in one call. Use apply_operations with "as" aliases ($name) for multi-part builds, plus selectors ({ name: "Shelf*" }, { group }, { selection: true }), patterns (count/spacing) and the place/align/distribute operations instead of computing every coordinate yourself. Give apply_operations a short "label"; it becomes the undo step name.
 - Check your work with the bounds, changes and warnings each call returns. Use render_views when shape or alignment matters (it is only available while the app is connected; images cost tokens, so ask for 1–2 views).
 - Name parts meaningfully ("Left side", "Shelf 2"): names appear in cut lists and the Objects panel.
+- Identical parts (legs, doors, shelves) should be linked copies: make_component { target: { name: "Leg*" } } after duplicating, so changing one changes all. Say what parts are made of with set_properties (material, finish, edge banding, part number, note): the cut list, the booklet and GLB materials use it.
 - Holes are parts with hole: true. They cut every solid they overlap. Keep sizes positive.
 - To show how an assembly goes together, explode_view (the user's view) or render_views { explode: 0.6 } (just your images). Both are view-only; any edit you make reassembles the user's view first.
 - 3D printing: overlapping parts are fused into one watertight solid on export_stl, so overlap them freely. A hole in a group can cut only that group (set_hole only_own_group). For models too big or too round to print in one go, split_for_print cuts them into two pieces with pegs and clearance holes (at, axis, pegs, clearance).
@@ -26,7 +27,7 @@ How to work:
 
 export const WORKSPACE_GUIDES: Record<WorkspaceId, string> = {
   print: `Print workspace (3D printing): keep parts inside the printer's build volume (check_print, place_on_plate). Sliding fits need ~0.2 mm clearance, press fits ~0.1 mm. Minimum wall ~1.2 mm (3 perimeters at a 0.4 mm nozzle). Avoid unsupported overhangs steeper than 45°. Holes for M3 screws are Ø3.2–3.4 mm.`,
-  workshop: `Workshop workspace (woodworking): use real sheet thicknesses (18, 12, 6 mm plywood; 19 mm = 3/4"). Name every board, because get_cut_list groups boards by name and size. When the design is settled, offer build instructions (set_instructions). Allow for real joinery (dadoes, rebates) when parts meet.`,
+  workshop: `Workshop workspace (woodworking): use real sheet thicknesses (18, 12, 6 mm plywood; 19 mm = 3/4"). Name every board, because get_cut_list groups boards by name and size. Set material and edge banding on boards (set_properties) and link identical parts (make_component). When the design is settled, offer build instructions (set_instructions). Allow for real joinery (dadoes, rebates) when parts meet.`,
   build: `Build workspace (houses): the model is still in mm but the UI shows cm. Typical exterior wall 250 mm thick, interior 100–150 mm, door opening 900 × 2100 mm, ceiling height 2500–2700 mm. Openings (doors, windows) are hole parts in the walls.`,
 };
 

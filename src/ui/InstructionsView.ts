@@ -27,6 +27,9 @@ const STRINGS = {
     width: 'Width',
     length: 'Length',
     colour: 'Colour',
+    material: 'Material',
+    banding: 'Edge banding',
+    bandingText: (long: number, short: number) => [long ? `${long} long` : '', short ? `${short} short` : ''].filter(Boolean).join(', '),
     step: 'Step',
     add: (count: number, letter: string, name: string) => `Add ${count} × ${letter} (${name}).`,
     done: 'Done!',
@@ -53,6 +56,9 @@ const STRINGS = {
     width: 'Širina',
     length: 'Dužina',
     colour: 'Boja',
+    material: 'Materijal',
+    banding: 'Kant',
+    bandingText: (long: number, short: number) => [long ? `${long} ${long === 1 ? 'duža' : 'duže'}` : '', short ? `${short} ${short === 1 ? 'kraća' : 'kraće'}` : ''].filter(Boolean).join(', '),
     step: 'Korak',
     add: (count: number, letter: string, name: string) => `Postavite ${count} × ${letter} (${name}).`,
     done: 'Gotovo!',
@@ -188,14 +194,20 @@ export class InstructionsView {
         h('img', { src: images.get(p.letter)!, alt: '' }),
         h('div', { class: 'ins-part-name' }, p.name),
         h('div', { class: 'ins-part-dims' }, `${dims(p)} ${units}`),
+        p.material || p.finish ? h('div', { class: 'ins-part-dims' }, [p.material, p.finish].filter(Boolean).join(' · ')) : null,
       )),
     );
-    const head = h('tr', {}, ...[t.letter, t.name, t.qty, `${t.thickness} (${units})`, `${t.width} (${units})`, `${t.length} (${units})`, t.colour].map((c) => h('th', {}, c)));
+    const withMaterial = r.parts.some((p) => p.material);
+    const withBanding = r.parts.some((p) => p.banding);
+    const band = (p: PartType) => (p.banding ? `${t.bandingText(p.banding.long, p.banding.short)}${p.banding.thickness ? ` · ${p.banding.thickness} mm` : ''}` : '');
+    const head = h('tr', {}, ...[t.letter, t.name, t.qty, `${t.thickness} (${units})`, `${t.width} (${units})`, `${t.length} (${units})`, ...(withMaterial ? [t.material] : []), ...(withBanding ? [t.banding] : []), t.colour].map((c) => h('th', {}, c)));
     const rows = r.parts.map((p) => h('tr', {},
       h('td', {}, h('span', { class: 'ins-letter small' }, p.letter)),
       h('td', {}, p.name),
       h('td', { class: 'num' }, String(p.quantity)),
       ...p.dims.map((d) => h('td', { class: 'num' }, formatLength(d, units, false))),
+      withMaterial ? h('td', {}, p.material ?? '') : null,
+      withBanding ? h('td', {}, band(p)) : null,
       h('td', {}, h('span', { class: 'ins-swatch', style: `background:${p.color}` })),
     ));
     return h('section', { class: 'ins-page' },

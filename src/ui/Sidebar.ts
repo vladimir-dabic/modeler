@@ -20,6 +20,7 @@ import {
   type PrinterSetting,
   type WorkspaceConfig,
 } from '../model/workspaces';
+import { canLink } from '../model/parts';
 import { h, isTextInput } from './dom';
 import { icon } from './icons';
 
@@ -471,8 +472,65 @@ export class Sidebar {
         this.row(e.kind === 'box' ? 'Corner' : e.kind === 'sphere' ? 'Centre' : e.kind === 'tube' ? 'Start' : 'Base', this.vecInputs(e.position, (i, v) => set({ position: vec3(e.position, i, v) }, 'Move'), 'length')),
         this.row('Rotation', this.vecInputs(e.rotation, (i, v) => set({ rotation: vec3(e.rotation, i, v) }, 'Rotate'), 'angle')),
       ),
+      this.partSection([e]),
       this.actionsRow([id], [this.commandButton('edit.group', 'group', 'Group')]),
     );
+  }
+
+  /**
+   * What the parts are made of (ADR 0025): material, finish, edge banding, part number,
+   * note, and whether they are linked copies. Several parts: a field shows a value only
+   * when they all share it; typing sets it on all.
+   */
+  private partSection(entities: Entity[]): Node {
+    // 3D prints are one material (the filament, chosen in the Print tab).
+    if (this.actions.workspace().printPlate) return document.createDocumentFragment();
+    const target = { ids: entities.map((e) => e.id) };
+    const shared = <T>(get: (e: Entity) => T): T | undefined => {
+      const v = get(entities[0]);
+      return entities.every((e) => JSON.stringify(get(e)) === JSON.stringify(v)) ? v : undefined;
+    };
+    const set = (patch: Record<string, unknown>, label: string) => this.call('set_properties', { target, ...patch }, label);
+    const text = (field: 'material' | 'finish' | 'partNo' | 'note', key: string, label: string, placeholder: string, list?: string) => {
+      const value = (shared((e) => e[field]) as string | undefined) ?? '';
+      const el = this.input(value, (t) => set({ [key]: t.trim() || null }, label), { title: placeholder, cls: 'text-field' });
+      const input = (el instanceof HTMLInputElement ? el : el.querySelector('input'))!;
+      input.placeholder = entities.length > 1 && shared((e) => e[field]) === undefined ? 'mixed' : placeholder;
+      if (list) input.setAttribute('list', list);
+      return el;
+    };
+    // Materials already used in the model, offered while typing.
+    const materials = [...new Set(this.doc.entities.map((e) => e.material).filter(Boolean))] as string[];
+    const datalist = h('datalist', { id: 'materials-list' }, ...materials.map((m) => h('option', { value: m })));
+    const rows: (HTMLElement | null)[] = [
+      this.row('Material', text('material', 'material', 'Material', 'e.g. Oak veneered MDF', 'materials-list')),
+      this.row('Finish', text('finish', 'finish', 'Finish', 'e.g. Oiled, black powder coat')),
+    ];
+    if (entities.every((e) => e.kind === 'box' && !e.hole)) {
+      const b = shared((e) => e.banding ?? null);
+      const count = (which: 'long' | 'short') => {
+        const sel = h('select', { class: 'select tiny', 'aria-label': `${which} edges banded` },
+          ...[0, 1, 2].map((n) => h('option', { value: String(n), selected: (b?.[which] ?? 0) === n }, String(n))));
+        sel.addEventListener('change', () => {
+          const next = { long: b?.long ?? 0, short: b?.short ?? 0, ...(b?.thickness ? { thickness: b.thickness } : {}), [which]: Number(sel.value) };
+          set({ banding: next.long || next.short ? next : null }, 'Edge banding');
+        });
+        return sel;
+      };
+      rows.push(this.row('Edge banding', h('span', { class: 'banding' }, count('long'), h('span', { class: 'muted small' }, 'long'), count('short'), h('span', { class: 'muted small' }, 'short')), 'How many long and short edges get edge banding'));
+    }
+    rows.push(
+      this.row('Part no.', text('partNo', 'part_no', 'Part number', 'optional')),
+      this.row('Note', text('note', 'note', 'Note', 'for the maker, e.g. grain lengthwise')),
+    );
+    const component = shared((e) => e.component);
+    const copies = component ? this.doc.entities.filter((e) => e.component === component).length : 0;
+    const link = component
+      ? h('div', { class: 'prop-row' }, h('span', { class: 'prop-label' }, 'Linked'), h('span', {}, `${copies} copies — editing one edits all `, h('button', { class: 'btn small', onclick: () => this.actions.runCommand('edit.makeUnique') }, 'Make unique')))
+      : canLink(entities)
+        ? h('div', { class: 'prop-row' }, h('span', { class: 'prop-label' }, 'Linked'), h('button', { class: 'btn small', title: 'Link these identical parts: editing one edits all', onclick: () => this.actions.runCommand('edit.makeComponent') }, 'Make component'))
+        : null;
+    return this.section('Part', datalist, ...rows, link);
   }
 
   private commandButton(command: string, iconName: string, label: string, danger = false): HTMLElement {
@@ -509,6 +567,7 @@ export class Sidebar {
           return this.call('move', { target: { group: g.id }, to, anchor: 'min' }, 'Move group');
         }, 'length'), 'Lowest corner of the group’s bounds'),
       ),
+      this.partSection(members.filter((m) => !m.hole).length ? members.filter((m) => !m.hole) : members),
       this.actionsRow(members.map((m) => m.id), [
         this.commandButton('edit.openGroup', 'openGroup', 'Open'),
         this.commandButton('edit.ungroup', 'ungroup', 'Ungroup'),
@@ -523,6 +582,7 @@ export class Sidebar {
       this.section('Type', this.typeToggle(entities)),
       this.section('Colour', this.colorPicker(entities)),
       this.section('Bounds', h('div', { class: 'muted' }, this.boundsText(entities))),
+      this.partSection(entities),
       this.actionsRow(ids, [this.commandButton('edit.group', 'group', 'Group')]),
     );
   }

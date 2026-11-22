@@ -106,6 +106,15 @@ type Target =
 - `export_model` writes GLB for other 3D programs: separate named parts (not fused), groups as nested nodes, metres Y-up ([ADR 0020](adr/0020-glb-export-own-writer.md)).
 - `export_stl` writes one fused, watertight solid. The `check_print` / `get_quantities` totals count overlapping parts once.
 
+## Components and part properties
+
+- `make_component { target, match? }` links identical parts as copies of one component: editing the shape, colour or properties of one edits all; each keeps its place, name and group. `make_unique { target }` unlinks ([ADR 0025](adr/0025-components-and-part-properties.md)).
+- `set_properties { target, material?, finish?, banding?, part_no?, note? }` (null clears) says what parts are made of; the cut list, booklet and GLB use it.
+
+## Clipboard
+
+- `paste { data, offset? }` inserts parts copied with ⌘C (JSON text, format `modeler-clipboard`): new ids, whole groups and attached notes kept, in place or beside the model ([ADR 0023](adr/0023-clipboard-tabs-new-project.md)). Copying itself is UI-only (`copyParts` in `src/model/clipboard.ts`).
+
 ## Build instructions
 
 - `get_instructions` / `set_instructions { title?, intro?, language?, steps? }` ([ADR 0021](adr/0021-build-instructions-booklet.md)). Letters, quantities and pictures are derived from the model; only the title, intro, language and step order with texts are stored. A step is `{ parts?: target, text? }`; `steps: null` goes back to the suggested bottom-up steps.

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { localBounds } from './geometry';
 import type { Entity, Unit } from './types';
+import { bandingText } from './parts';
 import { formatLength } from './units';
 
 export interface CutListRow {
@@ -11,6 +12,9 @@ export interface CutListRow {
   width: number;
   length: number;
   note: string;
+  /** Part properties (ADR 0025), when set. */
+  material?: string;
+  banding?: string;
 }
 
 /**
@@ -36,17 +40,18 @@ export function buildCutList(entities: Entity[]): CutListRow[] {
     }
     dims.sort((a, b) => a - b);
     const [thickness, width, length] = dims.map((d) => Math.round(d * 100) / 100);
-    const key = `${thickness}|${width}|${length}|${note}`;
+    const banding = bandingText(e.banding);
+    const key = `${thickness}|${width}|${length}|${note}|${e.material ?? ''}|${banding}`;
     const row = rows.get(key);
     if (row) {
       row.quantity++;
       if (!row.names.includes(e.name)) row.names.push(e.name);
     } else {
-      rows.set(key, { names: [e.name], quantity: 1, thickness, width, length, note });
+      rows.set(key, { names: [e.name], quantity: 1, thickness, width, length, note, ...(e.material ? { material: e.material } : {}), ...(banding ? { banding } : {}) });
     }
   }
   return [...rows.values()].sort(
-    (a, b) => b.thickness - a.thickness || b.length - a.length || b.width - a.width,
+    (a, b) => (a.material ?? '').localeCompare(b.material ?? '') || b.thickness - a.thickness || b.length - a.length || b.width - a.width,
   );
 }
 
@@ -55,7 +60,7 @@ function csvCell(value: string): string {
 }
 
 export function cutListToCsv(rows: CutListRow[], unit: Unit): string {
-  const header = ['Part', 'Qty', `Thickness (${unit})`, `Width (${unit})`, `Length (${unit})`, 'Notes'];
+  const header = ['Part', 'Qty', `Thickness (${unit})`, `Width (${unit})`, `Length (${unit})`, 'Material', 'Edge banding', 'Notes'];
   const lines = [header.join(',')];
   for (const r of rows) {
     lines.push(
@@ -65,6 +70,8 @@ export function cutListToCsv(rows: CutListRow[], unit: Unit): string {
         formatLength(r.thickness, unit, false),
         formatLength(r.width, unit, false),
         formatLength(r.length, unit, false),
+        r.material ?? '',
+        r.banding ?? '',
         r.note,
       ]
         .map(csvCell)

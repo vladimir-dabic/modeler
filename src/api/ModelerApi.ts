@@ -132,6 +132,7 @@ export class ModelerApi {
     if (own) doc.begin();
     try {
       const data = op.run!(this.ctx, parsed);
+      doc.syncComponents(before);
       const changes = this.diff(before, groupsBefore);
       for (const id of changes.touched) validateEntity(doc.get(id)!);
       if (own) doc.commit(meta.label ?? (parsed as { label?: string }).label ?? labelFor(op.name));

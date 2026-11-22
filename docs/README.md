@@ -13,7 +13,7 @@
 
 ## The one-paragraph version
 
-Modeler is a SketchUp-style 3D modeler that runs in the browser. Instead of a mesh, it stores **parametric entities** (boxes, cylinders, extruded outlines) in **millimetres, Z-up**. Parts can be **holes** that cut into solids. There are three **workspaces**: Print (3D printing), Workshop (woodworking) and Build (houses). They tune units, snapping, materials and panels for each scale of work. Every change to the model is a **transaction** on one `ModelDocument`. The guiding principle (ADR 0008): **the modeler is an API**. The UI, the in-app AI assistant and the MCP server all change the model through the same typed operations.
+Modeler is a SketchUp-style 3D modeler that runs in the browser. Instead of a mesh, it stores **parametric entities** (boxes, cylinders, extruded outlines) in **millimetres, Z-up**. Parts can be **holes** that cut into solids. There are three **workspaces**: Print (3D printing), Workshop (woodworking) and Build (houses). They tune units, snapping, materials and panels for each scale of work. Every change to the model is a **transaction** on one `ModelDocument`. The guiding principle (ADR 0008): **the modeler is an API**. The UI, the in-app AI assistant and the MCP server all change the model through the same typed operations. It is made for hobbyists, home makers and semi-professionals who prompt their way from an idea to something they can build (ADR 0024): buildable output and automatic checks come before richer modelling.
 
 ## Keeping these docs current
 

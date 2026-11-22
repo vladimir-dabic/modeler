@@ -121,13 +121,16 @@ export function exportGlb(targets: Entity[], all: Entity[], groups: Group[], opt
     return json.accessors.length - 1;
   };
 
-  const materialFor = (color: string) => {
-    const key = color.toLowerCase();
+  // Named by the part's material where it has one (ADR 0025), so a renderer can swap it once.
+  const materialFor = (color: string, material?: string) => {
+    const hex = color.toLowerCase();
+    const key = `${material ?? ''}|${hex}`;
     let index = materialByColor.get(key);
     if (index === undefined) {
-      const [r, g, b] = linearColor(key);
+      const [r, g, b] = linearColor(hex);
+      const sameName = material && [...materialByColor.keys()].some((k) => k.startsWith(`${material}|`));
       json.materials.push({
-        name: `Colour ${key}`,
+        name: material ? (sameName ? `${material} ${hex}` : material) : `Colour ${hex}`,
         pbrMetallicRoughness: { baseColorFactor: [r, g, b, 1], metallicFactor: 0, roughnessFactor: 0.8 },
       });
       index = json.materials.length - 1;
@@ -167,7 +170,7 @@ export function exportGlb(targets: Entity[], all: Entity[], groups: Group[], opt
       POSITION: accessor({ bufferView: view(new Uint8Array(positions.buffer), ARRAY_BUFFER), componentType: FLOAT, count: position.count, type: 'VEC3', min, max }),
       NORMAL: accessor({ bufferView: view(new Uint8Array(normals.buffer), ARRAY_BUFFER), componentType: FLOAT, count: position.count, type: 'VEC3' }),
     };
-    const primitive: Record<string, unknown> = { attributes, material: materialFor(entity.color), mode: TRIANGLES };
+    const primitive: Record<string, unknown> = { attributes, material: materialFor(entity.color, entity.material), mode: TRIANGLES };
     if (g.index) {
       const indices = Uint32Array.from(g.index.array as ArrayLike<number>);
       primitive.indices = accessor({ bufferView: view(new Uint8Array(indices.buffer), ELEMENT_ARRAY_BUFFER), componentType: UNSIGNED_INT, count: indices.length, type: 'SCALAR' });

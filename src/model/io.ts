@@ -6,6 +6,7 @@ import { newId } from './Document';
 import { pruneGroups } from './groups';
 import { parseAnnotation, pruneAnnotations } from './annotations';
 import { parseInstructions } from './instructions';
+import { parsePartFields } from './parts';
 import { parseReferenceFile } from './references';
 import type { DocumentFile, Entity, Group, ReferenceFile, Unit, Vec2, Vec3 } from './types';
 import { DEFAULT_PRINTER_SETTING, isWorkspaceId, PRINTERS, type PrinterSetting, type WorkspaceId } from './workspaces';
@@ -30,6 +31,7 @@ function parseEntity(raw: any): Entity | null {
     ...(raw.quiet === true ? { quiet: true } : {}),
     visible: raw.visible !== false,
     ...(typeof raw.groupId === 'string' && raw.groupId ? { groupId: raw.groupId } : {}),
+    ...parsePartFields(raw),
   };
   const segments = (min: number, max: number, fallback: number) => (isNum(raw.segments) ? Math.max(min, Math.min(max, Math.round(raw.segments))) : fallback);
   switch (raw.kind) {
@@ -181,25 +183,25 @@ const SETTINGS_KEY = 'modeler.settings.v1';
  * Best-effort autosave. If the file is over the storage quota (usually a large reference
  * drawing), the model is saved without reference drawings and 'partial' is returned.
  */
-export function saveAutosave(file: DocumentFile): 'ok' | 'partial' | 'failed' {
+export function saveAutosave(file: DocumentFile, key = AUTOSAVE_KEY): 'ok' | 'partial' | 'failed' {
   try {
-    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(file));
+    localStorage.setItem(key, JSON.stringify(file));
     return 'ok';
   } catch {
     // Storage may be unavailable (private mode) or full.
   }
   if (!file.references?.length) return 'failed';
   try {
-    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ ...file, references: [] }));
+    localStorage.setItem(key, JSON.stringify({ ...file, references: [] }));
     return 'partial';
   } catch {
     return 'failed';
   }
 }
 
-export function loadAutosave(): DocumentFile | null {
+export function loadAutosave(key = AUTOSAVE_KEY): DocumentFile | null {
   try {
-    const text = localStorage.getItem(AUTOSAVE_KEY);
+    const text = localStorage.getItem(key);
     return text ? parseDocumentFile(text) : null;
   } catch {
     return null;

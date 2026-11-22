@@ -3,6 +3,8 @@ import { ModelerApi, type ApiResult } from './api';
 import { BridgeClient, type BridgeStatus } from './bridge/BridgeClient';
 import { activeCsgEngine, type CsgEngine } from './model/csg';
 import { exportGlb } from './model/gltf';
+import { copyParts, parseClip } from './model/clipboard';
+import { canLink } from './model/parts';
 import type { ExplodeAxis } from './model/explode';
 import { cutListToCsv, buildCutList } from './model/cutlist';
 import { ModelDocument } from './model/Document';
@@ -48,6 +50,8 @@ import { icon } from './ui/icons';
 import { ProjectFiles, type OpenedFile, type FileHandle } from './ui/ProjectFiles';
 import { ContextMenu, type MenuItem } from './ui/ContextMenu';
 import { InstructionsView } from './ui/InstructionsView';
+import { NewProjectDialog } from './ui/NewProjectDialog';
+import { TabSession } from './ui/TabSession';
 import { ShortcutsDialog } from './ui/ShortcutsDialog';
 import { Sidebar } from './ui/Sidebar';
 import { Snapper } from './viewport/Snapper';
@@ -84,6 +88,11 @@ function safeStorage(): Storage | null {
 }
 
 
+/** The last copy in this browser, for pasting when the system clipboard can't be read. */
+const CLIP_KEY = 'modeler.clipboard.v1';
+/** Commands the browser's own ⌘C / ⌘X / ⌘V events handle (key per command). */
+const NATIVE_CLIPBOARD: Record<string, string> = { 'edit.copy': 'c', 'edit.cut': 'x', 'edit.paste': 'v' };
+
 export class App {
   readonly doc = new ModelDocument();
   readonly settings: Settings = loadSettings();
@@ -104,7 +113,8 @@ export class App {
   private readonly contextMenu = new ContextMenu();
   /** Buttons whose tooltip shows a (customisable) shortcut. */
   private readonly titled: { el: HTMLElement; label: string; command: string }[] = [];
-  private readonly workspaceButtons = new Map<WorkspaceId, HTMLButtonElement>();
+  private readonly workspaceChip = h('button', { class: 'ws-chip', 'aria-label': 'Workspace', 'aria-haspopup': 'menu' });
+  private readonly newProject = new NewProjectDialog();
   private printIssues: FitIssue[] = [];
   private readonly els: {
     hint: HTMLElement;
@@ -131,6 +141,8 @@ export class App {
   };
   /** The project file being edited (ADR 0016). */
   readonly files = new ProjectFiles();
+  /** This tab's autosave slot (ADR 0023). */
+  private readonly session = new TabSession({ local: localStorage, session: sessionStorage });
   /** Changed since the last save or open. */
   private dirty = false;
   private defaultColor = '#d4dae3';
@@ -207,8 +219,7 @@ export class App {
     const docName = h('span', { class: 'doc-name', title: 'The project file you are editing' });
     const recentBtn = h('button', { class: 'tb-btn caret-btn', 'aria-label': 'Open recent', title: 'Open recent', onclick: () => void this.showRecent(recentBtn) }, '▾');
     const topbar = h('header', { class: 'topbar' },
-      h('div', { class: 'brand' }, h('span', { class: 'brand-mark', html: icon('box', 18) }), 'Modeler', docName),
-      this.workspaceSwitcher(),
+      h('div', { class: 'brand' }, h('span', { class: 'brand-mark', html: icon('box', 18) }), 'Modeler', docName, this.workspaceSwitcher()),
       h('div', { class: 'tb-group' },
         btn('new', 'New model', 'file.new'),
         btn('open', 'Open project…', 'file.open'),
@@ -240,7 +251,7 @@ export class App {
     const sidebarEl = h('aside', { class: 'sidebar' });
     const statusbar = h('footer', { class: 'statusbar' }, hint, h('div', { class: 'vcb-wrap' }, vcbLabel, vcb));
     this.shortcuts = new ShortcutsDialog(this.keymap);
-    root.append(topbar, toolbar, vpEl, sidebarEl, statusbar, toast, this.shortcuts.el);
+    root.append(topbar, toolbar, vpEl, sidebarEl, statusbar, toast, this.shortcuts.el, this.newProject.el);
 
     this.els = { hint, vcbLabel, vcb, toast, empty, undo, redo, units, snap, snapStep, snapList, ortho, xray, cuts, groupBadge, ai, docName, explode, explodeControls, explodeSlider, explodeAxis };
 
@@ -388,6 +399,7 @@ export class App {
     this.bindSettings();
     this.bindPointer();
     this.bindKeyboard();
+    this.bindClipboard();
     this.bindVcb();
     this.bindDragDrop();
 
@@ -403,11 +415,14 @@ export class App {
   // ---- startup / persistence ----------------------------------------------
 
   private restore() {
-    const saved = loadAutosave();
+    this.files.currentKey = this.session.currentFileKey;
+    this.session.start(window);
+    const saved = loadAutosave(this.session.autosaveKey);
     if (saved) {
       this.doc.load(saved, true);
       // Reconnect to the file the autosaved model came from, so ⌘S saves back to it.
-      void this.files.restoreCurrent().then(() => this.updateChrome());
+      const from = this.session.sourceFileKey;
+      if (from) void this.files.restoreCurrent(from).then(() => this.updateChrome());
     }
     this.dirty = false;
     this.applyWorkspace();
@@ -422,19 +437,17 @@ export class App {
     return WORKSPACES[this.doc.workspace];
   }
 
+  /** The workspace as a small badge next to the file name; click to change it. */
   private workspaceSwitcher(): HTMLElement {
-    const wrap = h('div', { class: 'tb-group workspace-switch', role: 'radiogroup', 'aria-label': 'Workspace' });
-    for (const id of WORKSPACE_IDS) {
-      const ws = WORKSPACES[id];
-      const b = this.withTitle(
-        h('button', { class: 'ws-btn', role: 'radio', onclick: () => this.runCommand(`workspace.${id}`), html: `${icon(ws.icon, 16)}<span>${ws.name}</span>` }),
-        `${ws.name} workspace — ${ws.tagline}`,
-        `workspace.${id}`,
-      );
-      this.workspaceButtons.set(id, b);
-      wrap.append(b);
-    }
-    return wrap;
+    const chip = this.workspaceChip;
+    chip.addEventListener('click', () => {
+      const r = chip.getBoundingClientRect();
+      this.contextMenu.open(r.left, r.bottom + 4, WORKSPACE_IDS.map((id) => ({
+        label: `${id === this.doc.workspace ? '✓ ' : ''}${WORKSPACES[id].name} — ${WORKSPACES[id].tagline}`,
+        run: () => this.runCommand(`workspace.${id}`),
+      })));
+    });
+    return chip;
   }
 
   /** Switch workspace (through the API, so the AI does it the same way). */
@@ -456,10 +469,8 @@ export class App {
     this.defaultColor = ws.defaultColor;
     this.viewport.applyWorkspace(ws);
     if (ws.printPlate) this.viewport.setPlate(printerVolume(this.doc.printer), printerName(this.doc.printer));
-    for (const [wid, b] of this.workspaceButtons) {
-      b.classList.toggle('active', wid === id);
-      b.setAttribute('aria-checked', String(wid === id));
-    }
+    this.workspaceChip.innerHTML = `${icon(ws.icon, 14)}<span>${ws.name}</span><span class="caret">▾</span>`;
+    this.workspaceChip.title = `${ws.name} workspace — ${ws.tagline} Click to change.`;
     this.updatePrintChecks();
     this.sidebar.setPanels(ws.panels);
     this.refreshEmptyCard();
@@ -526,7 +537,8 @@ export class App {
   }
 
   private autosave() {
-    const status = saveAutosave(this.doc.toFile());
+    const status = saveAutosave(this.doc.toFile(), this.session.autosaveKey);
+    if (status !== 'failed') this.session.saved();
     if (status === 'partial' && !this.warnedAutosave) {
       this.warnedAutosave = true;
       this.toast('The reference drawing is too large for the browser autosave. Save the project to keep it.');
@@ -733,6 +745,16 @@ export class App {
       },
       'edit.delete': () => this.deleteSelection(),
       'edit.duplicate': () => this.duplicateSelection(),
+      'edit.makeComponent': () => {
+        const n = this.doc.selection.size;
+        if (n > 1 && this.uiCall('make_component', { target: { selection: true } }, 'Make component').ok) this.toast(`Linked ${n} copies — editing one now edits all`);
+      },
+      'edit.makeUnique': () => {
+        if (this.doc.selection.size && this.uiCall('make_unique', { target: { selection: true } }, 'Make unique').ok) this.toast('Unlinked — these parts can now be changed on their own');
+      },
+      'edit.copy': () => void this.copyToSystem(false),
+      'edit.cut': () => void this.copyToSystem(true),
+      'edit.paste': () => void this.pasteFromSystem(),
       'edit.selectAll': () => this.doc.setSelection(this.doc.entities.filter((x) => x.visible).map((x) => x.id)),
       'edit.placeOnGround': () => this.placeOnGround(selected()),
       'edit.toggleHole': () => {
@@ -772,7 +794,7 @@ export class App {
         saveSettings(this.settings);
         this.toast(`Snap ${this.settings.snapEnabled ? 'on' : 'off'}`);
       },
-      'file.new': () => this.newModel(),
+      'file.new': () => this.newProject.open(this.doc.workspace, (id) => this.newModel(id)),
       'file.open': () => void this.open(),
       'file.save': () => void this.save(),
       'file.saveAs': () => void this.save(true),
@@ -852,7 +874,7 @@ export class App {
 
   private bindKeyboard() {
     window.addEventListener('keydown', (e) => {
-      if (this.shortcuts.isOpen) return; // the dialog handles its own keys
+      if (this.shortcuts.isOpen || this.newProject.isOpen) return; // dialogs handle their own keys
       // The booklet is a page over the app: only undo/redo reach the model.
       if (this.instructions.isOpen && !((e.metaKey || e.ctrlKey) && /^[zy]$/i.test(e.key))) return;
       if (e.target === this.els.vcb) return; // handled by the measurement box
@@ -893,6 +915,9 @@ export class App {
 
       const combo = comboFromEvent(e);
       const command = combo ? this.keymap.commandFor(combo) : undefined;
+      // The browser's own ⌘C / ⌘X / ⌘V: let it fire copy/cut/paste events (handled in
+      // bindClipboard), which read and write the system clipboard without a permission prompt.
+      if (command && NATIVE_CLIPBOARD[command] && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === NATIVE_CLIPBOARD[command]) return;
       if (command) {
         e.preventDefault();
         this.runCommand(command);
@@ -914,6 +939,88 @@ export class App {
       this.heldKey = null;
       this.endTempNav(true);
     });
+  }
+
+  // ---- clipboard (ADR 0023) -------------------------------------------------------------
+
+  private bindClipboard() {
+    const skip = (e: ClipboardEvent) => isTextInput(e.target) || this.shortcuts.isOpen || this.instructions.isOpen;
+    const copy = (e: ClipboardEvent, cut: boolean) => {
+      if (skip(e) || !this.doc.selected().length) return;
+      const text = this.copySelection(cut);
+      if (!text || !e.clipboardData) return;
+      e.clipboardData.setData('text/plain', text);
+      e.preventDefault();
+    };
+    window.addEventListener('copy', (e) => copy(e, false));
+    window.addEventListener('cut', (e) => copy(e, true));
+    window.addEventListener('paste', (e) => {
+      if (skip(e)) return;
+      e.preventDefault();
+      this.pasteText(e.clipboardData?.getData('text/plain') ?? null);
+    });
+  }
+
+  /** Copy (or cut) the selection; returns the clipboard text. Also kept locally as a fallback. */
+  private copySelection(cut: boolean): string | null {
+    const sel = this.doc.selected();
+    if (!sel.length) {
+      this.toast('Select parts to copy first');
+      return null;
+    }
+    if (cut && this.refuseWhileExploded()) return null;
+    const text = JSON.stringify(copyParts(sel, this.doc.entities, this.doc.groups, this.doc.annotations));
+    try {
+      localStorage.setItem(CLIP_KEY, text);
+    } catch {
+      // Too big or storage blocked: the system clipboard still has it.
+    }
+    const n = `${sel.length} part${sel.length === 1 ? '' : 's'}`;
+    if (cut) {
+      if (this.uiCall('delete_entities', { target: { ids: sel.map((e) => e.id) } }, 'Cut').ok) this.toast(`Cut ${n} — paste with ${this.keymap.label('edit.paste') || 'Paste'}`);
+    } else {
+      this.toast(`Copied ${n}`);
+    }
+    return text;
+  }
+
+  /** Menu or rebound key: use the async clipboard API (may ask for permission). */
+  private async copyToSystem(cut: boolean) {
+    const text = this.copySelection(cut);
+    if (text) await navigator.clipboard?.writeText(text).catch(() => {});
+  }
+
+  private async pasteFromSystem() {
+    let text: string | null = null;
+    try {
+      text = (await navigator.clipboard?.readText()) ?? null;
+    } catch {
+      // Permission denied or unsupported: fall back to the last copy in this browser.
+    }
+    this.pasteText(text);
+  }
+
+  /** Paste clipboard text: our parts, or (if the clipboard is empty or unreadable) the last copy. */
+  private pasteText(text: string | null) {
+    let data = parseClip(text) ? text : null;
+    if (!data && !text?.trim()) {
+      try {
+        data = localStorage.getItem(CLIP_KEY);
+      } catch {
+        data = null;
+      }
+    }
+    if (!data || !parseClip(data)) {
+      this.toast('Nothing to paste — copy parts in Modeler first');
+      return;
+    }
+    this.active.cancel();
+    const result = this.uiCall('paste', { data }, 'Paste');
+    if (!result.ok) return;
+    const d = result.data as { ids: string[]; parts: number; moved: number[] };
+    this.doc.setSelection(d.ids);
+    const beside = d.moved.some((v) => v !== 0);
+    this.toast(`Pasted ${d.parts} part${d.parts === 1 ? '' : 's'}${beside ? ' beside the model' : ''}`);
   }
 
   private bindVcb() {
@@ -1000,15 +1107,19 @@ export class App {
     this.toastTimer = window.setTimeout(() => el.classList.remove('visible'), 2400);
   }
 
-  private newModel() {
+  /** A new, empty project of the chosen kind (from the New project dialog). */
+  private newModel(workspace: WorkspaceId = this.doc.workspace) {
     this.active.cancel();
     this.setExplode(0);
-    if (!this.doc.entities.length) return;
-    this.doc.load({ format: 'modeler', version: 1, units: this.doc.units, entities: [] }, false);
+    const hadParts = this.doc.entities.length > 0;
+    if (hadParts) this.doc.load({ format: 'modeler', version: 1, units: this.doc.units, entities: [] }, false, 'New model');
     this.files.reset();
+    this.setWorkspace(workspace);
     this.dirty = false;
     this.updateChrome();
-    this.toast('New model — Undo (⌘/Ctrl+Z) brings the old one back');
+    this.viewport.zoomExtents();
+    const kind = WORKSPACES[workspace].name;
+    this.toast(hadParts ? `New ${kind} project — Undo (⌘/Ctrl+Z) brings the old model back` : `New ${kind} project`);
   }
 
   private async open() {
@@ -1223,7 +1334,11 @@ export class App {
       const sel = this.doc.selected();
       const allHoles = sel.every((x) => x.hole);
       return [
+        item('edit.copy', 'Copy'),
+        item('edit.cut', 'Cut'),
         item('edit.duplicate', 'Duplicate'),
+        ...(canLink(sel) ? [item('edit.makeComponent', 'Make component (link copies)')] : []),
+        ...(sel.some((x) => x.component) ? [item('edit.makeUnique', 'Make unique')] : []),
         item('edit.group', group ? 'Group (nest in a new group)' : 'Group'),
         ...(group ? [item('edit.ungroup', 'Ungroup'), item('edit.openGroup', 'Open group')] : []),
         'separator',
@@ -1237,7 +1352,7 @@ export class App {
         item('edit.delete', 'Delete', true),
       ];
     }
-    const items: MenuItem[] = [item('edit.selectAll', 'Select all'), item('view.extents', 'Zoom extents')];
+    const items: MenuItem[] = [item('edit.paste', 'Paste'), 'separator', item('edit.selectAll', 'Select all'), item('view.extents', 'Zoom extents')];
     if (this.doc.entities.some((x) => !x.visible)) items.push(item('edit.showHidden', 'Show all hidden'));
     if (this.doc.openGroupId) items.push(item('edit.closeGroup', 'Close group'));
     items.push('separator', item('view.iso', 'Iso view'), item('view.top', 'Top view'), item('view.front', 'Front view'));

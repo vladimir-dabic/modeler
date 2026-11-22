@@ -72,7 +72,7 @@ describe('cut list', () => {
 
   it('exports CSV with escaping', () => {
     const csv = cutListToCsv(buildCutList([board('a', [18, 100, 200], 'Top, front')]), 'mm');
-    expect(csv.split('\n')[1]).toBe('"Top, front",1,18,100,200,');
+    expect(csv.split('\n')[1]).toBe('"Top, front",1,18,100,200,,,');
   });
 });
 

@@ -32,6 +32,31 @@ interface EntityBase {
   visible: boolean;
   /** Group this entity belongs to (see Group); absent = top level. */
   groupId?: string;
+  /**
+   * Component (ADR 0025): parts with the same id are linked copies. They share everything
+   * except name, position, rotation, visibility and group, so editing one edits all.
+   */
+  component?: string;
+  // ---- part properties (ADR 0025): what the part is made of, for cut lists and the booklet ----
+  /** e.g. "Oak veneered MDF", "White melamine chipboard", "Steel S235". */
+  material?: string;
+  /** e.g. "Oiled", "Black powder coat". */
+  finish?: string;
+  /** Edge banding of a board: how many long and short edges, and the band thickness. */
+  banding?: EdgeBanding;
+  /** The maker's part number or code. */
+  partNo?: string;
+  /** Free notes for whoever makes it, e.g. "grain lengthwise". */
+  note?: string;
+}
+
+export interface EdgeBanding {
+  /** Long edges banded: 0, 1 or 2. */
+  long: 0 | 1 | 2;
+  /** Short edges banded: 0, 1 or 2. */
+  short: 0 | 1 | 2;
+  /** Band thickness, mm (e.g. 0.5, 1, 2). */
+  thickness?: number;
 }
 
 /** Axis-aligned (in local space) box spanning [0, size] on each axis. */

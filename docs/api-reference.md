@@ -50,6 +50,10 @@ All lengths are millimetres, angles degrees, world Z-up. Write operations return
 | [`export_stl`](#export_stl) | needs a host capability (async) |
 | [`export_model`](#export_model) | needs a host capability (async) |
 | [`get_instructions`](#get_instructions) | read (no change) |
+| [`paste`](#paste) | write (one undo step) |
+| [`make_component`](#make_component) | write (one undo step) |
+| [`make_unique`](#make_unique) | write (one undo step) |
+| [`set_properties`](#set_properties) | write (one undo step) |
 | [`set_instructions`](#set_instructions) | write (one undo step) |
 | [`add_note`](#add_note) | write (one undo step) |
 | [`add_dimension`](#add_dimension) | write (one undo step) |
@@ -577,6 +581,53 @@ Write the model for other 3D programs: GLB (binary glTF) for SketchUp (File > Im
 The build-instructions booklet (IKEA style) the app prints: identical parts lettered A, B, C… with quantities and sizes (mm), and the assembly steps (stored, or suggested bottom-up). The user opens it with the Instructions button.
 
 No input.
+
+## paste
+
+*write (one undo step)*
+
+Insert parts copied with Copy (⌘C): clipboard text in the "modeler-clipboard" JSON format, e.g. from another project or tab. Everything gets new ids; groups and attached notes/dimensions come along. It lands where it was copied from, or beside the model (+x) if that spot is taken; offset moves it instead. Inside an open group, it is pasted into that group.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `data` | string | yes | The copied text |
+| `offset` | [number, number, number] |  | Move the pasted parts by this, mm (instead of the automatic placement) |
+
+## make_component
+
+*write (one undo step)*
+
+Link identical parts as copies of one component ("Leg × 4", "Door × 12"): from then on, changing the size, shape, colour or properties of one changes all, while each keeps its own place, name and group. Duplicating a copy adds another linked copy. The parts must be the same kind; if they differ, match: true makes them all like the first.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } | yes | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
+| `match` | boolean |  | Make all targeted parts like the first one (default false: they must already be identical) |
+
+## make_unique
+
+*write (one undo step)*
+
+Unlink parts from their component, so they can be changed on their own.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } | yes | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
+
+## set_properties
+
+*write (one undo step)*
+
+Say what parts are made of, for the cut list and the build booklet: material ("Oak veneered MDF", "White melamine chipboard", "Steel tube 40×40×2"), finish ("Oiled", "Black powder coat"), edge banding of boards ({ long: 2, short: 1, thickness: 1 }), part number and a note for the maker. Only given fields change; null clears one. Linked copies (components) all get it.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } | yes | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
+| `material` | string \| null |  |  |
+| `finish` | string \| null |  |  |
+| `banding` | { long, short, thickness } \| null |  |  |
+| `part_no` | string \| null |  |  |
+| `note` | string \| null |  |  |
 
 ## set_instructions
 

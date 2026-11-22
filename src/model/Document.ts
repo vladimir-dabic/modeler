@@ -1,6 +1,7 @@
 import { pruneGroups } from './groups';
 import { pruneAnnotations } from './annotations';
 import type { Instructions } from './instructions';
+import { syncComponents } from './parts';
 import type { Annotation, DocumentFile, DrawingGeometry, Entity, EntityKind, Group, ReferenceDrawing, ReferenceFile, Unit } from './types';
 import { DEFAULT_PRINTER_SETTING, type PrinterSetting, type WorkspaceId } from './workspaces';
 
@@ -181,6 +182,11 @@ export class ModelDocument {
   commit(label?: string): void {
     if (this.txSnapshot === null) return;
     const before = this.txSnapshot;
+    // Linked copies follow the copy that was edited (tools edit entities directly).
+    if (this.entities.some((e) => e.component)) {
+      const prev = (JSON.parse(before) as { entities: Entity[] }).entities;
+      this.syncComponents(new Map(prev.map((e) => [e.id, JSON.stringify(e)])));
+    }
     this.txSnapshot = null;
     if (this.snapshot() !== before) {
       this.undoStack.push({ snapshot: before, label });
@@ -330,6 +336,11 @@ export class ModelDocument {
     const a = this.getAnnotation(id);
     if (!a) return;
     this.autoTx(() => mutate(a));
+  }
+
+  /** Make linked copies match the copy that changed since `before` (ADR 0025). Returns changed ids. */
+  syncComponents(before: Map<string, string>): string[] {
+    return syncComponents(this.entities, before);
   }
 
   setInstructions(next: Instructions | null): void {

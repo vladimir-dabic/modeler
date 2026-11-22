@@ -2,6 +2,8 @@
 
 SketchUp-style browser modeler (Vite + TS + Three.js, no UI framework). **Read [docs/README.md](docs/README.md) first.** Architecture: [docs/architecture.md](docs/architecture.md). Decisions: [docs/adr/](docs/adr/README.md).
 
+Audience: hobbyists, home makers and semi-pros who prompt Claude from an idea to a build. Not a SketchUp competitor: make it buildable (parts, hardware, checks, cut list, drawings) before making it richer ([ADR 0024](docs/adr/0024-product-focus-prompt-first-making.md)).
+
 ## Guiding principle: the modeler is an API
 
 The UI, the in-app AI assistant and the MCP server are all clients of one typed, validated **Modeler API** in `src/api` ([ADR 0008](docs/adr/0008-modeler-api-single-entry-point.md), design: [docs/modeler-api.md](docs/modeler-api.md), generated reference: [docs/api-reference.md](docs/api-reference.md)).

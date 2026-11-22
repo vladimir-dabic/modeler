@@ -4,7 +4,7 @@ Everything is stored in **millimetres** internally. The display unit (mm / cm / 
 
 ## Workspaces
 
-Pick a workspace from the switch next to the logo, or from the start card in an empty model. It's saved with each project, and you can change it any time. Switching changes units, snap, colours and panels; it never changes your model.
+You pick the workspace when you start: **New** asks *What are you making?* (so does the start card in an empty model). It's saved with the project and shown as a small badge next to the file name; click the badge to change it any time. Switching changes units, snap, colours and panels; it never changes your model.
 
 | | **Print** | **Workshop** | **Build** |
 |---|---|---|---|
@@ -146,6 +146,11 @@ Customisations are saved in the browser.
 - **Round edges:** a box's *Round edges* field in Properties rounds every edge and corner (printed enclosures, soft blocks).
 - **Revolved shapes** (vases, cups, knobs, turned legs) and **tubes** (handles, tails, cables, rails: smooth through a list of points, optionally tapering) are created through the API, so ask Claude over MCP, e.g. *"add a cup 90 mm tall"* or *"a handle tube from here to there"*. Once they exist, you can move, rotate, copy, mirror, colour and cut them like any part, and change a tube's diameter in Properties.
 
+## Linked copies and what parts are made of
+
+- **Linked copies (components):** select identical parts (e.g. 4 legs), right-click → **Make component**. From then on, changing the size, shape, colour or material of one changes all; each still has its own place and name. Duplicating or copying a linked part makes another linked copy. **Make unique** unlinks a part.
+- **Part** section in Properties (Workshop and Build): **material**, **finish**, **edge banding** (how many long and short edges), **part no.** and a **note** for the maker. Select several parts to set them all at once. The cut list groups parts by material and banding, and the build booklet lists them.
+
 ## Build instructions
 
 **Instructions** in the toolbar opens an IKEA-style booklet of the model, to build it yourself or send it to a craftsman:
@@ -226,10 +231,12 @@ Projects are `.modeler.json` files: plain JSON with everything in it (parts, gro
 - **Save as (`⇧⌘/Ctrl+Shift+S`):** saves to a new file, which becomes the current one.
 - **Open (`⌘/Ctrl+O`),** or drag a project file onto the window. Opening is one undo step, so `⌘Z` brings back what you had.
 - **Open recent:** the **▾** next to Open lists the last 8 projects (Chrome and Edge).
-- **Autosave:** the model is also saved to the browser continuously and restored when you come back, still linked to its file, so `⌘S` keeps saving to it.
+- **Autosave:** the model is also saved to the browser continuously and restored when you come back, still linked to its file, so `⌘S` keeps saving to it. Every browser tab has its own autosave, so two projects open side by side never overwrite each other. A new tab picks up the work you closed last.
 - **New:** starts an empty, *Untitled* model in the current workspace. Undo brings the previous one back.
 - **STL:** exports the selection, or everything, in mm with holes applied.
 - **GLB:** for SketchUp (File > Import > glTF Binary), Blender, Twinmotion and other renderers. Exports the selection, or everything: one named object per part, groups nested as in the Objects panel, holes applied, one material per colour, converted to metres.
 - **Cut list CSV:** from the Cut list tab.
+
+**Copy, cut, paste:** `⌘/Ctrl+C`, `⌘/Ctrl+X`, `⌘/Ctrl+V` (also in the right-click menu). Copy takes the selected parts with their groups and attached notes, and it goes through the system clipboard, so you can paste into another tab or another project. Pasted parts land where they were copied from, or beside the model if that place is taken, and come in selected.
 
 Undo/redo: `⌘/Ctrl+Z` and `⇧⌘Z` / `Ctrl+Y`. Duplicate: `⌘/Ctrl+D` (a copy appears beside the original and is selected). Group / Ungroup: `⌘/Ctrl+G` / `⇧⌘/Ctrl+Shift+G`. Delete: `Del` / `Backspace`. Hide and *Show all hidden* are in the right-click menu (and bindable).

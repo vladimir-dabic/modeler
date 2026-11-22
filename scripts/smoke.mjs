@@ -15,6 +15,12 @@ const CHROME = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Conte
 const outDir = process.argv[2] ?? 'test-results';
 mkdirSync(outDir, { recursive: true });
 
+/** The workspace badge next to the file name opens a menu of workspaces (ADR 0023). */
+async function pickWorkspace(page, name) {
+  await page.click('.ws-chip');
+  await page.click(`.cm-item:has-text("${name} —")`);
+}
+
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 const errors = [];
@@ -59,7 +65,7 @@ check('Manifold geometry engine loads in the browser', engine === 'manifold', en
 
 // 0. Fresh start defaults to the Print workspace; the first part of this test is woodworking.
 check('defaults to the Print workspace', await page.evaluate(() => window.modeler.doc.workspace === 'print'));
-await page.click('.ws-btn:has-text("Workshop")');
+await pickWorkspace(page, 'Workshop');
 check('Workshop sets mm and 1 mm snap', await page.evaluate(() => window.modeler.doc.units === 'mm' && window.modeler.settings.snapStep === 1));
 
 // Zoom so a ~1 m model fits.
@@ -294,7 +300,7 @@ check('autosave restored after reload', ents.length >= 6, `${ents.length} entiti
 {
   await page.keyboard.press('Escape');
   await page.evaluate(() => window.modeler.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, false));
-  await page.click('.ws-btn:has-text("Print")');
+  await pickWorkspace(page, 'Print');
   const tabs = await page.$$eval('.tab', (t) => t.map((x) => x.textContent));
   check('Print workspace shows a Print tab, no cut list', tabs.includes('Print') && !tabs.includes('Cut list'), tabs.join(','));
   await page.evaluate(() => window.modeler.doc.add({ id: 'p1', name: 'Arm', kind: 'box', position: [200, 100, 0], rotation: [0, 0, 0], size: [120, 20, 10], color: '#f08c3a', hole: false, visible: true }));
@@ -316,20 +322,20 @@ check('autosave restored after reload', ents.length >= 6, `${ents.length} entiti
   await page.click('button:has-text("Place on plate")');
   check('Place on plate fits it onto the A1 mini', await page.isVisible('.status-card.ok'));
 
-  await page.click('.ws-btn:has-text("Build")');
+  await pickWorkspace(page, 'Build');
   check('Build switches to cm', await page.evaluate(() => window.modeler.doc.units === 'cm'));
   check('Build has a Quantities tab', (await page.$$eval('.tab', (t) => t.map((x) => x.textContent))).includes('Quantities'));
   await page.waitForTimeout(400);
   await page.reload();
   await page.waitForFunction(() => window.modeler);
   check('workspace and printer survive reload', await page.evaluate(() => window.modeler.doc.workspace === 'build' && window.modeler.doc.printer.profile === 'bambu-a1-mini'));
-  await page.click('.ws-btn:has-text("Print")');
+  await pickWorkspace(page, 'Print');
 }
 
 // 15. Groups, right-click menu, Modeler API in the browser
 {
   await page.keyboard.press('Escape');
-  await page.click('.ws-btn:has-text("Workshop")');
+  await pickWorkspace(page, 'Workshop');
   await page.evaluate(() => {
     const { api, doc } = window.modeler;
     doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, false);
@@ -496,7 +502,7 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   await tab.goto(URL);
   await tab.waitForFunction(() => window.modeler);
   await tab.evaluate(() => window.modeler.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true));
-  await tab.click('.ws-btn:has-text("Workshop")');
+  await pickWorkspace(tab, 'Workshop');
   const [chooser] = await Promise.all([tab.waitForEvent('filechooser'), tab.click('button[aria-label^="Import a DXF"]')]);
   await chooser.setFiles({ name: 'kitchen.dxf', mimeType: 'application/dxf', buffer: Buffer.from(dxf.join('\n')) });
   await tab.waitForFunction(() => window.modeler.doc.references.length === 1, null, { timeout: 5000 }).catch(() => {});
@@ -564,7 +570,7 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   await tab.goto(URL);
   await tab.waitForFunction(() => window.modeler);
   await tab.evaluate(() => window.modeler.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true));
-  await tab.click('.ws-btn:has-text("Workshop")');
+  await pickWorkspace(tab, 'Workshop');
   await tab.evaluate(() => {
     const app = window.modeler;
     app.api.call('add_box', { name: 'Cabinet', size: [600, 300, 700] });
@@ -686,6 +692,7 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   st = await state();
   check('⇧⌘S saves as a new file', st.pickers.save === 2 && st.disk['kitchen-v2.modeler.json'] === 2 && st.name === 'kitchen-v2', JSON.stringify(st));
   await tab.evaluate(() => window.modeler.runCommand('file.new'));
+  await tab.click('.np-card.current'); // New asks what you're making; keep the current kind
   st = await state();
   check('New model starts Untitled', st.name === 'Untitled' && !st.dirty, JSON.stringify(st));
   await tab.keyboard.press('Meta+o');
@@ -842,7 +849,7 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
     app.viewport.setView('iso', false);
     app.viewport.zoomExtents();
   });
-  await tab.click('.ws-btn:has-text("Workshop")');
+  await pickWorkspace(tab, 'Workshop');
   await tab.evaluate(() => window.modeler.viewport.zoomExtents());
   const snapshot = () =>
     tab.evaluate(() => {
@@ -943,6 +950,109 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   check('the open booklet follows API changes (language)', kicker === 'Uputstvo za izradu', kicker);
   await tab.keyboard.press('Escape');
   check('Escape closes the booklet', (await tab.locator('.ins-overlay').count()) === 0);
+  await tab.close();
+}
+
+// 25. Copy/paste between tabs, one autosave per tab, New project dialog, workspace badge (ADR 0023).
+{
+  const context = await browser.newContext({ viewport: { width: 1300, height: 850 } });
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new globalThis.URL(URL).origin });
+  const a = await context.newPage();
+  const b = await context.newPage();
+  for (const [t, n] of [[a, 'A'], [b, 'B']]) {
+    t.on('pageerror', (e) => errors.push(`tab ${n} pageerror: ${e.message}`));
+    await t.goto(URL);
+    await t.waitForFunction(() => window.modeler);
+  }
+  await a.bringToFront();
+  await a.evaluate(() => {
+    const app = window.modeler;
+    app.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true);
+    app.api.call('apply_operations', { operations: [
+      { name: 'add_box', input: { name: 'Leg', size: [40, 40, 400] }, as: 'l' },
+      { name: 'add_box', input: { name: 'Top', size: [500, 300, 20], position: [0, 0, 400] }, as: 't' },
+      { name: 'group', input: { target: { ids: ['$l', '$t'] }, name: 'Stool' } },
+    ] });
+    app.doc.setSelection(app.doc.entities.map((e) => e.id));
+  });
+  await a.evaluate(() => window.modeler.runCommand('edit.copy'));
+  await a.waitForTimeout(150);
+  const copied = await a.evaluate(() => navigator.clipboard.readText());
+  check('Copy puts the parts on the system clipboard', copied.includes('"modeler-clipboard"'), copied.slice(0, 60));
+  // Tab B: a real paste event (what ⌘V fires), with the copied text.
+  await b.bringToFront();
+  await b.evaluate(() => window.modeler.doc.load({ format: 'modeler', version: 1, units: 'mm', entities: [] }, true));
+  await b.evaluate((text) => {
+    const data = new DataTransfer();
+    data.setData('text/plain', text);
+    document.body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true }));
+  }, copied);
+  const pasted = await b.evaluate(() => ({ names: window.modeler.doc.entities.map((e) => e.name), groups: window.modeler.doc.groups.map((g) => g.name), selected: window.modeler.doc.selection.size, label: window.modeler.doc.undoLabel }));
+  check('…and a paste in another tab brings them in, grouped and selected, as one undo step', JSON.stringify(pasted.names) === '["Leg","Top"]' && pasted.groups[0] === 'Stool' && pasted.selected === 2 && pasted.label === 'Paste', JSON.stringify(pasted));
+  // Pasting again in the same tab lands beside, not on top.
+  await b.evaluate(() => window.modeler.runCommand('edit.paste'));
+  await b.waitForTimeout(200);
+  const again = await b.evaluate(() => window.modeler.doc.entities.filter((e) => e.name === 'Leg').map((e) => e.position[0]));
+  check('pasting again goes beside the model', again.length === 2 && again[1] > 500, JSON.stringify(again));
+  // Each tab autosaves into its own slot.
+  await a.waitForTimeout(500);
+  const slots = await a.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('modeler.autosave.v1:')).map((k) => JSON.parse(localStorage.getItem(k)).entities.length).sort());
+  check('two tabs keep two autosaves (no overwriting)', JSON.stringify(slots) === '[2,4]', JSON.stringify(slots));
+  // New asks what you're making; the badge shows and changes the workspace.
+  await a.bringToFront();
+  await a.evaluate(() => window.modeler.runCommand('file.new'));
+  const dialog = await a.locator('.new-project').isVisible();
+  await a.click('.np-card[data-workspace="build"]');
+  const fresh = await a.evaluate(() => ({ parts: window.modeler.doc.entities.length, ws: window.modeler.doc.workspace, badge: document.querySelector('.ws-chip').textContent }));
+  check('New asks what you are making and starts that kind of project', dialog && fresh.parts === 0 && fresh.ws === 'build' && fresh.badge.startsWith('Build'), JSON.stringify(fresh));
+  await a.screenshot({ path: `${outDir}/modeler-new-project.png`, clip: { x: 0, y: 0, width: 1300, height: 60 } });
+  await pickWorkspace(a, 'Workshop');
+  check('the workspace badge switches workspace', (await a.evaluate(() => window.modeler.doc.workspace)) === 'workshop');
+  await context.close();
+}
+
+// 26. Components and part properties (ADR 0025): link copies from the menu, edit one, set a material.
+{
+  const tab = await browser.newPage({ viewport: { width: 1300, height: 900 } });
+  tab.on('pageerror', (e) => errors.push(`parts tab pageerror: ${e.message}`));
+  await tab.goto(URL);
+  await tab.waitForFunction(() => window.modeler);
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.doc.load({ format: 'modeler', version: 1, units: 'mm', workspace: 'workshop', entities: [] }, true);
+    app.api.call('apply_operations', { operations: [
+      { name: 'add_box', input: { name: 'Leg', size: [50, 50, 400], position: [0, 0, 0] }, as: 'l' },
+      { name: 'duplicate', input: { target: { ids: ['$l'] }, pattern: { linear: { count: 4, step: [200, 0, 0] } } } },
+    ] });
+    app.doc.setSelection(app.doc.entities.map((e) => e.id));
+    app.viewport.zoomExtents();
+  });
+  const box = await tab.locator('canvas').first().boundingBox();
+  const at = await tab.evaluate(() => {
+    const app = window.modeler;
+    const e = app.doc.entities[0];
+    const p = new app.viewport.camera.position.constructor(e.position[0] + 25, e.position[1] + 25, 200).project(app.viewport.camera);
+    return { x: ((p.x + 1) / 2), y: ((1 - p.y) / 2) };
+  });
+  await tab.mouse.click(box.x + at.x * box.width, box.y + at.y * box.height, { button: 'right' });
+  const menu = await tab.locator('.context-menu .cm-item').allTextContents();
+  await tab.click('.cm-item:has-text("Make component")');
+  const linked = await tab.evaluate(() => new Set(window.modeler.doc.entities.map((e) => e.component)).size === 1 && !!window.modeler.doc.entities[0].component);
+  check('right-click → Make component links the selected legs', menu.some((t) => t.startsWith('Make component')) && linked, menu.join(', '));
+  // Edit one copy in Properties: all follow.
+  await tab.evaluate(() => window.modeler.doc.setSelection([window.modeler.doc.entities[2].id]));
+  const sizeField = tab.locator('.prop-section:has(h4:text("Dimensions")) .prop-row').first().locator('input').nth(2);
+  await sizeField.fill('450');
+  await sizeField.press('Enter');
+  const heights = await tab.evaluate(() => window.modeler.doc.entities.map((e) => e.size[2]));
+  check('changing one linked copy in Properties changes all', JSON.stringify(heights) === '[450,450,450,450]', JSON.stringify(heights));
+  const material = tab.locator('.prop-section:has(h4:text("Part")) .prop-row:has-text("Material") input');
+  await material.fill('Oak');
+  await material.press('Enter');
+  const mats = await tab.evaluate(() => window.modeler.doc.entities.map((e) => e.material));
+  const linkedText = await tab.locator('.prop-section:has(h4:text("Part"))').textContent();
+  check('a material set on one copy is on all; the panel says they are linked', mats.every((m) => m === 'Oak') && linkedText.includes('4 copies'), JSON.stringify({ mats, linkedText }));
+  await tab.locator('.sidebar').screenshot({ path: `${outDir}/modeler-part-properties.png` });
   await tab.close();
 }
 

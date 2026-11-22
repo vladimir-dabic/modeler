@@ -7,6 +7,8 @@ import { anchorFor, AXIS_VECTORS, dimensionGeometry, MAX_ANNOTATION_TEXT } from 
 import { DxfError, parseDxf } from '../model/dxf';
 import { exportStl, parseDocumentFile } from '../model/io';
 import { exportGlb } from '../model/gltf';
+import { instantiateClip, parseClip, pasteOffset } from '../model/clipboard';
+import { applyDefinition, bandingText, definitionKey, type PropertyField } from '../model/parts';
 import { INSTRUCTION_LANGUAGES, resolveInstructions, type Instructions, type InstructionsLanguage } from '../model/instructions';
 import { DRAWING_UNITS, DRAWING_UNIT_MM, localBounds, referenceMatrix } from '../model/references';
 import { cleanNumber, cleanVec, DEG, mirrorEntity, rotateEntityAbout, worldBounds } from '../model/geometry';
@@ -219,7 +221,7 @@ const getCutList = def({
   description: 'Woodworking cut list: identical parts grouped as thickness × width × length (mm) with quantities.',
   input: z.strictObject({}),
   run(ctx) {
-    return { rows: buildCutList(ctx.doc.entities).map((r) => ({ parts: r.names, qty: r.quantity, t_w_l: [r.thickness, r.width, r.length], note: r.note || undefined })) };
+    return { rows: buildCutList(ctx.doc.entities).map((r) => ({ parts: r.names, qty: r.quantity, t_w_l: [r.thickness, r.width, r.length], material: r.material, banding: r.banding, note: r.note || undefined })) };
   },
 });
 
@@ -1490,7 +1492,7 @@ function instructionsSummary(ctx: OperationContext) {
     language: r.language,
     suggested: r.suggested,
     size_mm: r.size,
-    parts: r.parts.map((t) => ({ letter: t.letter, name: t.name, qty: t.quantity, t_w_l: t.dims, ids: t.ids })),
+    parts: r.parts.map((t) => ({ letter: t.letter, name: t.name, qty: t.quantity, t_w_l: t.dims, ...(t.material ? { material: t.material } : {}), ...(t.banding ? { banding: bandingText(t.banding) } : {}), ids: t.ids })),
     steps: r.steps.map((s) => ({
       n: s.number,
       add: s.letters.map((l) => `${l.count}×${l.letter} ${types.get(l.letter)!.name}`).join(', '),
@@ -1544,6 +1546,127 @@ const setInstructions = def({
     }
     ctx.doc.setInstructions(Object.keys(next).length ? next : null);
     return instructionsSummary(ctx);
+  },
+});
+
+// ---- clipboard (ADR 0023) ---------------------------------------------------------------------
+
+const paste = def({
+  name: 'paste',
+  kind: 'write',
+  description:
+    'Insert parts copied with Copy (⌘C): clipboard text in the "modeler-clipboard" JSON format, e.g. from another project or tab. Everything gets new ids; groups and attached notes/dimensions come along. It lands where it was copied from, or beside the model (+x) if that spot is taken; offset moves it instead. Inside an open group, it is pasted into that group.',
+  input: z.strictObject({
+    data: z.string().min(2).max(5_000_000).describe('The copied text'),
+    offset: Vec3.optional().describe('Move the pasted parts by this, mm (instead of the automatic placement)'),
+  }),
+  run(ctx, input) {
+    const clip = parseClip(input.data);
+    if (!clip) throw new ApiError('invalid_input', 'This is not copied Modeler parts', 'Copy parts in Modeler first (⌘C), then paste.', 'data');
+    // Validate like a project file: unusable parts, dangling groups and notes are dropped.
+    const file = parseDocumentFile(JSON.stringify({ format: 'modeler', version: 1, units: 'mm', entities: clip.entities, groups: clip.groups, annotations: clip.annotations }));
+    if (!file.entities.length) throw new ApiError('invalid_input', 'The copied data has no usable parts', undefined, 'data');
+    const offset = input.offset ? (input.offset.map(cleanNumber) as V3) : pasteOffset(file.entities, ctx.doc.entities);
+    const fresh = instantiateClip({ ...clip, entities: file.entities, groups: file.groups ?? [], annotations: file.annotations ?? [] }, newId, offset);
+    const open = ctx.doc.openGroupId;
+    for (const e of fresh.entities) {
+      if (open && !e.groupId) e.groupId = open;
+      ctx.doc.add(e);
+    }
+    const groups = fresh.groups.map((g) => (open && !g.parentId ? { ...g, parentId: open } : g));
+    if (groups.length) ctx.doc.setGroups([...ctx.doc.groups, ...groups]);
+    for (const a of fresh.annotations) ctx.doc.addAnnotation(a);
+    return { ids: fresh.entities.map((e) => e.id), parts: fresh.entities.length, groups: groups.length, ...(fresh.annotations.length ? { annotations: fresh.annotations.length } : {}), moved: offset };
+  },
+});
+
+// ---- components and part properties (ADR 0025) ------------------------------------------------
+
+const makeComponent = def({
+  name: 'make_component',
+  kind: 'write',
+  description:
+    'Link identical parts as copies of one component ("Leg × 4", "Door × 12"): from then on, changing the size, shape, colour or properties of one changes all, while each keeps its own place, name and group. Duplicating a copy adds another linked copy. The parts must be the same kind; if they differ, match: true makes them all like the first.',
+  input: z.strictObject({
+    target: Target,
+    match: z.boolean().optional().describe('Make all targeted parts like the first one (default false: they must already be identical)'),
+  }),
+  run(ctx, input) {
+    const parts = ctx.resolve(input.target);
+    if (parts.length < 2) throw new ApiError('invalid_input', 'A component needs at least two parts', 'Target all the copies, e.g. { name: "Leg*" }.', 'target');
+    const first = parts[0];
+    const other = parts.find((e) => e.kind !== first.kind);
+    if (other) throw new ApiError('invalid_input', `"${other.name}" is a ${other.kind}, "${first.name}" a ${first.kind}`, 'Only parts of the same kind can be linked.', 'target');
+    const key = definitionKey({ ...first, component: undefined } as Entity);
+    const different = parts.filter((e) => definitionKey({ ...e, component: undefined } as Entity) !== key);
+    if (different.length && !input.match) {
+      throw new ApiError('invalid_input', `${different.length} part${different.length === 1 ? '' : 's'} differ from "${first.name}" (${different.slice(0, 3).map((e) => `"${e.name}"`).join(', ')})`, 'Use match: true to make them all like the first, or target only identical parts.', 'target');
+    }
+    const id = `c${newId()}`;
+    for (const e of parts) {
+      ctx.doc.transact(() => {
+        if (e !== first) applyDefinition(first, e);
+        e.component = id;
+      });
+    }
+    return { ids: parts.map((e) => e.id), component: id, copies: parts.length, ...(different.length ? { matched: different.map((e) => e.name) } : {}) };
+  },
+});
+
+const makeUnique = def({
+  name: 'make_unique',
+  kind: 'write',
+  description: 'Unlink parts from their component, so they can be changed on their own.',
+  input: z.strictObject({ target: Target }),
+  run(ctx, input) {
+    const parts = ctx.resolve(input.target).filter((e) => e.component);
+    if (!parts.length) throw new ApiError('not_found', 'None of these parts is a linked copy', undefined, 'target');
+    for (const e of parts) ctx.doc.transact(() => delete e.component);
+    // A component left with one copy isn't linked to anything any more.
+    for (const c of new Set(ctx.doc.entities.map((e) => e.component).filter(Boolean))) {
+      const left = ctx.doc.entities.filter((e) => e.component === c);
+      if (left.length === 1) ctx.doc.transact(() => delete left[0].component);
+    }
+    return { ids: parts.map((e) => e.id) };
+  },
+});
+
+const Banding = z.strictObject({
+  long: z.union([z.literal(0), z.literal(1), z.literal(2)]).describe('Long edges banded: 0, 1 or 2'),
+  short: z.union([z.literal(0), z.literal(1), z.literal(2)]).describe('Short edges banded: 0, 1 or 2'),
+  thickness: z.number().positive().max(10).optional().describe('Band thickness, mm (0.5, 1, 2…)'),
+});
+
+const setProperties = def({
+  name: 'set_properties',
+  kind: 'write',
+  description:
+    'Say what parts are made of, for the cut list and the build booklet: material ("Oak veneered MDF", "White melamine chipboard", "Steel tube 40×40×2"), finish ("Oiled", "Black powder coat"), edge banding of boards ({ long: 2, short: 1, thickness: 1 }), part number and a note for the maker. Only given fields change; null clears one. Linked copies (components) all get it.',
+  input: z.strictObject({
+    target: Target,
+    material: z.string().trim().min(1).max(120).nullable().optional(),
+    finish: z.string().trim().min(1).max(120).nullable().optional(),
+    banding: Banding.nullable().optional(),
+    part_no: z.string().trim().min(1).max(120).nullable().optional(),
+    note: z.string().trim().min(1).max(600).nullable().optional(),
+  }),
+  run(ctx, input) {
+    const parts = ctx.resolve(input.target);
+    const fields: [keyof typeof input, PropertyField][] = [['material', 'material'], ['finish', 'finish'], ['banding', 'banding'], ['part_no', 'partNo'], ['note', 'note']];
+    if (!fields.some(([k]) => input[k] !== undefined)) throw new ApiError('invalid_input', 'Give at least one property to set', 'material, finish, banding, part_no or note.');
+    for (const e of parts) {
+      ctx.doc.transact(() => {
+        const rec = e as unknown as Record<string, unknown>;
+        for (const [k, field] of fields) {
+          const v = input[k];
+          if (v === undefined) continue;
+          if (v === null) delete rec[field];
+          else rec[field] = k === 'banding' && typeof v === 'object' && !(v as { long: number; short: number }).long && !(v as { long: number; short: number }).short ? undefined : structuredClone(v);
+          if (rec[field] === undefined) delete rec[field];
+        }
+      });
+    }
+    return { ids: parts.map((e) => e.id), parts: parts.length };
   },
 });
 
@@ -1771,6 +1894,10 @@ export const OPERATIONS: OperationDef<any>[] = [
   exportStlOp,
   exportModel,
   getInstructions,
+  paste,
+  makeComponent,
+  makeUnique,
+  setProperties,
   setInstructions,
   addNote,
   addDimension,
