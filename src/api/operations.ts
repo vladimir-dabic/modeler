@@ -6,6 +6,7 @@ import { newId } from '../model/Document';
 import { anchorFor, AXIS_VECTORS, dimensionGeometry, MAX_ANNOTATION_TEXT } from '../model/annotations';
 import { DxfError, parseDxf } from '../model/dxf';
 import { exportStl, parseDocumentFile } from '../model/io';
+import { exportGlb } from '../model/gltf';
 import { DRAWING_UNITS, DRAWING_UNIT_MM, localBounds, referenceMatrix } from '../model/references';
 import { cleanNumber, cleanVec, DEG, mirrorEntity, rotateEntityAbout, worldBounds } from '../model/geometry';
 import { commonParentGroup, groupChain, groupMembers } from '../model/groups';
@@ -1236,6 +1237,28 @@ const exportStlOp = def({
   },
 });
 
+const exportModel = def({
+  name: 'export_model',
+  kind: 'host',
+  description:
+    'Write the model for other 3D programs: GLB (binary glTF) for SketchUp (File > Import), Blender, Twinmotion, Unreal, web/AR. Visible solids with holes cut, one named node per part, groups as nested nodes, one material per colour; converted to metres, Y-up. Target limits it to some parts; default: everything visible.',
+  input: z.strictObject({
+    path: FilePath.describe('Must end in .glb'),
+    format: z.enum(['glb']).optional().describe('Default: from the file extension'),
+    target: Target.optional(),
+  }),
+  async runAsync(ctx, input) {
+    const host = files(ctx);
+    if (!/\.glb$/i.test(input.path)) throw new ApiError('invalid_input', 'The file name must end in .glb', 'GLB is the only export_model format so far; use export_stl for 3D printing.', 'path');
+    const targets = input.target ? ctx.resolve(input.target) : ctx.doc.entities;
+    const name = input.path.replace(/^.*[\\/]/, '').replace(/\.glb$/i, '');
+    const result = exportGlb(targets, ctx.doc.entities, ctx.doc.groups, { name });
+    if (!result) throw new ApiError('not_found', 'Nothing to export', 'Only visible solid parts (not holes) are exported.');
+    const shown = await host.write(input.path, result.data);
+    return { path: shown, format: 'glb', parts: result.parts, groups: result.groups, materials: result.materials, triangles: result.triangles, bytes: result.data.byteLength };
+  },
+});
+
 // ---- annotations (ADR 0015) ----------------------------------------------------------------
 
 const PointRef = z
@@ -1675,6 +1698,7 @@ export const OPERATIONS: OperationDef<any>[] = [
   openFile,
   saveFile,
   exportStlOp,
+  exportModel,
   addNote,
   addDimension,
   dimensionParts,

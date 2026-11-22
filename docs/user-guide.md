@@ -214,6 +214,7 @@ Projects are `.modeler.json` files: plain JSON with everything in it (parts, gro
 - **Autosave:** the model is also saved to the browser continuously and restored when you come back, still linked to its file, so `⌘S` keeps saving to it.
 - **New:** starts an empty, *Untitled* model in the current workspace. Undo brings the previous one back.
 - **STL:** exports the selection, or everything, in mm with holes applied.
+- **GLB:** for SketchUp (File > Import > glTF Binary), Blender, Twinmotion and other renderers. Exports the selection, or everything: one named object per part, groups nested as in the Objects panel, holes applied, one material per colour, converted to metres.
 - **Cut list CSV:** from the Cut list tab.
 
 Undo/redo: `⌘/Ctrl+Z` and `⇧⌘Z` / `Ctrl+Y`. Duplicate: `⌘/Ctrl+D` (a copy appears beside the original and is selected). Group / Ungroup: `⌘/Ctrl+G` / `⇧⌘/Ctrl+Shift+G`. Delete: `Del` / `Backspace`. Hide and *Show all hidden* are in the right-click menu (and bindable).

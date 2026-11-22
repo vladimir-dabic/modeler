@@ -12,7 +12,7 @@ import type { NodeFileHost } from './files';
 export const SERVER_VERSION = '0.1.0';
 
 /** Operations that run in Node even in live mode (they touch files; the tab never does). */
-const FILE_OPS = new Set(['open_file', 'save_file', 'export_stl', 'import_dxf']);
+const FILE_OPS = new Set(['open_file', 'save_file', 'export_stl', 'export_model', 'import_dxf']);
 /** File operations that change the model: in live mode their result is pushed to the tab. */
 const PUSH_BACK = new Set(['open_file', 'import_dxf']);
 
@@ -25,7 +25,7 @@ const STATUS_TOOL = {
 
 const MCP_NOTES = `This MCP server has two modes (see connection_status):
 - live: the user clicked "Connect AI" in the open modeler app. Every call edits that model; the user sees it happen and can undo each call.
-- headless: no app is connected. Calls edit an in-memory model in this server. open_file / save_file / export_stl read and write files in the working folder (paths are relative to it).
+- headless: no app is connected. Calls edit an in-memory model in this server. open_file / save_file / export_stl / export_model read and write files in the working folder (paths are relative to it).
 File operations always run in this server, also in live mode (save_file then saves what the app shows).
 If connection_status reports update_available, the modeler was updated after this server started: tell the user to restart the modeler MCP server (Claude Code: /mcp → modeler → Reconnect; Claude Desktop: quit and reopen) to get the new tools.`;
 

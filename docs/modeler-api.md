@@ -54,7 +54,7 @@ api.toolDefinitions();                                     // [{ name, descripti
 | `write` | one transaction / undo step; validated; rolled back on error; returns `{ ids }` |
 | `settings` | document settings that are saved but not undoable (`set_workspace`, `set_printer`); the app reacts via `doc.onSettingsChange` |
 | `history` | `undo`, `redo` |
-| `host` | needs a host capability, called with `callAsync`: `render_views` (`host.renderViews`, the app), `open_file` / `save_file` / `export_stl` / `import_dxf { path }` (`host.files`, only the MCP server, limited to its working folder: [ADR 0013](adr/0013-mcp-server-bridge-and-files.md)). Without the capability they return `unsupported` |
+| `host` | needs a host capability, called with `callAsync`: `render_views` (`host.renderViews`, the app), `open_file` / `save_file` / `export_stl` / `export_model` / `import_dxf { path }` (`host.files`, only the MCP server, limited to its working folder: [ADR 0013](adr/0013-mcp-server-bridge-and-files.md)). Without the capability they return `unsupported` |
 
 ### Results
 
@@ -103,6 +103,7 @@ type Target =
 
 - `set_hole { target, hole, only_own_group? }`: `only_own_group: true` scopes a hole to its group ([ADR 0018](adr/0018-print-workflow-fuse-scope-split.md)).
 - `split_for_print { target, axis?, at?, gap?, pegs?, peg_diameter?, peg_depth?, clearance?, name? }` replaces the target with two parametric pieces with pegs and clearance holes. The result lists the pieces, the peg count and size, and `notes` if pegs had to shrink or didn't fit.
+- `export_model` writes GLB for other 3D programs: separate named parts (not fused), groups as nested nodes, metres Y-up ([ADR 0020](adr/0020-glb-export-own-writer.md)).
 - `export_stl` writes one fused, watertight solid. The `check_print` / `get_quantities` totals count overlapping parts once.
 
 ## Annotations

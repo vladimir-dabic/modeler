@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { ModelerApi, type ApiResult } from './api';
 import { BridgeClient, type BridgeStatus } from './bridge/BridgeClient';
 import { activeCsgEngine, type CsgEngine } from './model/csg';
+import { exportGlb } from './model/gltf';
 import type { ExplodeAxis } from './model/explode';
 import { cutListToCsv, buildCutList } from './model/cutlist';
 import { ModelDocument } from './model/Document';
@@ -212,6 +213,7 @@ export class App {
         btn('drawing', 'Import a DXF drawing (e.g. a floor plan) to build on and snap to', 'file.importDxf'),
         btn('save', 'Save project', 'file.save'),
         btn('export', 'Export STL for 3D printing (selection, or everything)', 'file.exportStl', 'STL'),
+        btn('export', 'Export GLB for SketchUp, Blender and renderers (selection, or everything)', 'file.exportGlb', 'GLB'),
       ),
       h('div', { class: 'tb-group' }, undo, redo),
       h('div', { class: 'tb-group views' },
@@ -760,6 +762,7 @@ export class App {
       'file.save': () => void this.save(),
       'file.saveAs': () => void this.save(true),
       'file.exportStl': () => this.exportStl(),
+      'file.exportGlb': () => this.exportGlb(),
       'file.importDxf': () => void this.importDxf(),
       'file.exportCutList': () => this.exportCutList(),
       'help.shortcuts': () => this.shortcuts.toggle(),
@@ -1116,6 +1119,19 @@ export class App {
     downloadBlob(buffer, `${this.files.name}${selected.length ? '-selection' : ''}.stl`, 'model/stl');
     const solids = targets.filter((e) => !e.hole && e.visible).length;
     this.toast(`Exported ${solids} solid${solids === 1 ? '' : 's'} to STL (mm, holes applied)`);
+  }
+
+  private exportGlb() {
+    const selected = this.doc.selected();
+    const targets = selected.length ? selected : this.doc.entities;
+    const name = `${this.files.name}${selected.length ? '-selection' : ''}`;
+    const result = exportGlb(targets, this.doc.entities, this.doc.groups, { name });
+    if (!result) {
+      this.toast('Nothing to export — add a solid first');
+      return;
+    }
+    downloadBlob(result.data as BlobPart, `${name}.glb`, 'model/gltf-binary');
+    this.toast(`Exported ${result.parts} part${result.parts === 1 ? '' : 's'} to GLB (metres, Y-up, holes applied)`);
   }
 
   private exportCutList() {

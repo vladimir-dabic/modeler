@@ -2,7 +2,7 @@
 // Usage: npm run dev (in another terminal), then `npm run smoke` (screenshots → test-results/)
 // or `node scripts/smoke.mjs <screenshot-dir>`.
 import { execSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -701,6 +701,14 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   });
   const [download] = await Promise.all([tab.waitForEvent('download', { timeout: 3000 }).catch(() => null), tab.keyboard.press('Meta+s')]);
   check('other browsers: Save downloads a copy', download?.suggestedFilename() === 'kitchen.modeler.json', download?.suggestedFilename());
+  // The toolbar's GLB button downloads a binary glTF of the model (ADR 0020).
+  const [glb] = await Promise.all([
+    tab.waitForEvent('download', { timeout: 3000 }).catch(() => null),
+    tab.getByRole('button', { name: /^Export GLB/ }).click(),
+  ]);
+  const glbPath = glb ? await glb.path() : null;
+  const glbHead = glbPath ? readFileSync(glbPath).subarray(0, 4).toString() : null;
+  check('toolbar GLB button downloads a glTF binary', glb?.suggestedFilename() === 'kitchen.glb' && glbHead === 'glTF', JSON.stringify({ name: glb?.suggestedFilename(), glbHead }));
   await tab.close();
 }
 

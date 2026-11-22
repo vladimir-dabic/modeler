@@ -214,6 +214,7 @@ src/
     units.ts            parse/format lengths and angles
     cutlist.ts          cut list grouping + CSV
     io.ts               file parse/validate, STL export, autosave, settings
+    gltf.ts             GLB export (own DOM-free writer, ADR 0020)
     dxf.ts              ASCII DXF → reference-drawing geometry (blocks, bulges, OCS)
     references.ts       reference drawings: placement matrix, bounds, snap points, validation
     annotations.ts      notes/dimensions: anchors, dimension geometry, pruning, validation

@@ -9,9 +9,9 @@ An MCP server that lets Claude (Claude Code, Claude Desktop, or any MCP client) 
 | When | the app is open and you clicked **Connect AI** | no app connected |
 | Calls edit | the model in your browser tab, as labelled undo steps (`AI: …`) | the server's own in-memory model |
 | `render_views` | yes (PNG images) | `unsupported` |
-| `open_file` / `save_file` / `export_stl` / `import_dxf` | yes: they run in the server on the tab's model | yes |
+| `open_file` / `save_file` / `export_stl` / `export_model` / `import_dxf` | yes: they run in the server on the tab's model | yes |
 
-File paths are relative to the server's **working folder** (`--root`, default: the folder it was started in). Paths outside it are refused. Only `.json` project files and `.stl` files are written; `.dxf` files are read by `import_dxf`.
+File paths are relative to the server's **working folder** (`--root`, default: the folder it was started in). Paths outside it are refused. Only `.json` project files, `.stl` and `.glb` files are written; `.dxf` files are read by `import_dxf`.
 
 ## Build
 

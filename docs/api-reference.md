@@ -48,6 +48,7 @@ All lengths are millimetres, angles degrees, world Z-up. Write operations return
 | [`open_file`](#open_file) | needs a host capability (async) |
 | [`save_file`](#save_file) | needs a host capability (async) |
 | [`export_stl`](#export_stl) | needs a host capability (async) |
+| [`export_model`](#export_model) | needs a host capability (async) |
 | [`add_note`](#add_note) | write (one undo step) |
 | [`add_dimension`](#add_dimension) | write (one undo step) |
 | [`dimension_parts`](#dimension_parts) | write (one undo step) |
@@ -553,6 +554,18 @@ Write a binary STL (mm) of the visible solids, with holes cut, for 3D printing. 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `path` | string | yes | Must end in .stl |
+| `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } |  | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
+
+## export_model
+
+*needs a host capability (async)*
+
+Write the model for other 3D programs: GLB (binary glTF) for SketchUp (File > Import), Blender, Twinmotion, Unreal, web/AR. Visible solids with holes cut, one named node per part, groups as nested nodes, one material per colour; converted to metres, Y-up. Target limits it to some parts; default: everything visible.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `path` | string | yes | Must end in .glb |
+| `format` | "glb" |  | Default: from the file extension |
 | `target` | { ids } \| { selection } \| { group } \| { name } \| { all, kind, hole, in_group } |  | Which parts to act on: { ids }, { selection: true }, { group }, { name } (wildcards ok), or filters { all, kind, hole, in_group } |
 
 ## add_note

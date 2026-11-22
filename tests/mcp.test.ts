@@ -148,6 +148,13 @@ describe('MCP server: headless mode', () => {
     expect(bytes.length).toBe(stl.data.bytes);
     expect(bytes.readUInt32LE(80)).toBe(stl.data.triangles);
     expect(stl.data.solids).toBe(1);
+
+    const glb = await call('export_model', { path: 'case.glb' });
+    expect(glb).toMatchObject({ ok: true, data: { format: 'glb', parts: 2 } });
+    const glbBytes = await readFile(join(dir, 'case.glb'));
+    expect(glbBytes.length).toBe(glb.data.bytes);
+    expect(glbBytes.subarray(0, 4).toString()).toBe('glTF');
+    expect((await call('export_model', { path: 'case.stl' })).error.message).toMatch(/\.glb/);
   });
 
   it('imports a DXF headless and saves it with the project', async () => {
