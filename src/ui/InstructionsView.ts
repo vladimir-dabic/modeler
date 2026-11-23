@@ -1,5 +1,5 @@
 import type * as THREE from 'three';
-import { resolveInstructions, type InstructionsLanguage, type PartType, type ResolvedInstructions, type ResolvedStep } from '../model/instructions';
+import { bookletGroups, instructionScope, resolveInstructions, storedInstructions, type InstructionsLanguage, type PartType, type ResolvedInstructions, type ResolvedStep } from '../model/instructions';
 import type { ModelDocument } from '../model/Document';
 import { formatLength } from '../model/units';
 import { InstructionImages } from '../viewport/InstructionImages';
@@ -15,6 +15,8 @@ import { h } from './dom';
 const STRINGS = {
   en: {
     booklet: 'Build instructions',
+    scope: 'Booklet for',
+    wholeModel: 'Whole model',
     size: 'Overall size',
     partsCount: (n: number) => `${n} part${n === 1 ? '' : 's'}`,
     parts: 'Parts',
@@ -44,6 +46,8 @@ const STRINGS = {
   },
   sr: {
     booklet: 'Uputstvo za izradu',
+    scope: 'Uputstvo za',
+    wholeModel: 'Ceo model',
     size: 'Ukupne mere',
     partsCount: (n: number) => `${n} ${n % 10 === 1 && n % 100 !== 11 ? 'deo' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'dela' : 'delova'}`,
     parts: 'Delovi',
@@ -83,6 +87,8 @@ export interface InstructionsHost {
 
 export class InstructionsView {
   private root: HTMLElement | null = null;
+  /** The top-level group the booklet is for; null = the whole model. */
+  private scope: string | null = null;
   private images: InstructionImages | null = null;
   private onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape' && !(e.target instanceof HTMLElement && e.target.isContentEditable)) this.close();
@@ -94,8 +100,10 @@ export class InstructionsView {
     return !!this.root;
   }
 
-  open() {
+  /** Open the booklet for the whole model, or for one top-level group (a piece of furniture). */
+  open(groupId: string | null = null) {
     this.close();
+    this.scope = groupId;
     this.root = h('div', { class: 'ins-overlay', role: 'dialog', 'aria-label': 'Build instructions' });
     document.body.append(this.root);
     document.body.classList.add('ins-open');
@@ -121,7 +129,10 @@ export class InstructionsView {
   private render() {
     const root = this.root!;
     const { doc } = this.host;
-    const r = resolveInstructions(doc.entities, doc.instructions, this.host.name());
+    const pieces = bookletGroups(doc.entities, doc.groups);
+    if (this.scope && !pieces.some((g) => g.id === this.scope)) this.scope = null; // deleted or emptied
+    const scoped = instructionScope(doc.entities, doc.groups, this.scope);
+    const r = resolveInstructions(scoped, storedInstructions(doc.instructions, this.scope), this.scope ? doc.getGroup(this.scope)!.name : this.host.name());
     const t = STRINGS[r.language];
     const scroll = root.querySelector('.ins-pages')?.scrollTop ?? 0;
 
@@ -129,9 +140,22 @@ export class InstructionsView {
       h('option', { value: 'en', selected: r.language === 'en' }, 'English'),
       h('option', { value: 'sr', selected: r.language === 'sr' }, 'Srpski'),
     );
-    language.addEventListener('change', () => this.host.call('set_instructions', { language: language.value }, 'Instructions language'));
+    language.addEventListener('change', () => this.save({ language: language.value }, 'Instructions language'));
+    // Several pieces of furniture in one project: one booklet each, or one for everything.
+    const scope = pieces.length > 1 || this.scope
+      ? h('select', { class: 'select', 'aria-label': t.scope, title: t.scope },
+          h('option', { value: '', selected: !this.scope }, t.wholeModel),
+          ...pieces.map((g) => h('option', { value: g.id, selected: g.id === this.scope }, g.name)),
+        )
+      : null;
+    scope?.addEventListener('change', () => {
+      this.scope = scope.value || null;
+      this.root?.querySelector('.ins-pages')?.scrollTo(0, 0);
+      this.render();
+    });
     const toolbar = h('div', { class: 'ins-toolbar' },
       h('strong', {}, t.booklet),
+      scope ? h('span', { class: 'ins-scope' }, t.scope, scope) : null,
       h('span', { class: 'ins-spacer' }),
       language,
       h('button', { class: 'btn primary', onclick: () => window.print() }, t.print),
@@ -146,7 +170,7 @@ export class InstructionsView {
     }
 
     this.images?.dispose();
-    this.images = new InstructionImages(this.host.renderer, doc.entities, doc.groups);
+    this.images = new InstructionImages(this.host.renderer, scoped, doc.groups);
     const partImages = new Map(r.parts.map((p) => [p.letter, this.images!.part(p, 220, 150)]));
     const letterOf = new Map<string, string>();
     for (const p of r.parts) for (const id of p.ids) letterOf.set(id, p.letter);
@@ -169,8 +193,8 @@ export class InstructionsView {
   private cover(r: ResolvedInstructions, t: (typeof STRINGS)['en']): HTMLElement {
     const units = this.host.doc.units;
     const [x, y, z] = r.size;
-    const title = this.editable('h1', r.title, '', (text) => this.host.call('set_instructions', { title: text || this.host.name() }, 'Instructions title'));
-    const intro = this.editable('p', r.intro ?? '', t.introPlaceholder, (text) => this.host.call('set_instructions', { intro: text || null }, 'Instructions intro'));
+    const title = this.editable('h1', r.title, '', (text) => this.save({ title: text || r.title }, 'Instructions title'));
+    const intro = this.editable('p', r.intro ?? '', t.introPlaceholder, (text) => this.save({ intro: text || null }, 'Instructions intro'));
     intro.classList.add('ins-intro');
     return h('section', { class: 'ins-page ins-cover' },
       h('div', { class: 'ins-kicker' }, t.booklet),
@@ -246,7 +270,12 @@ export class InstructionsView {
       const text = s.number === number ? value : s.text;
       return { ...(s.add.length ? { parts: { ids: s.add } } : {}), ...(text ? { text } : {}) };
     }).filter((s) => 'parts' in s || 'text' in s);
-    if (steps.length) this.host.call('set_instructions', { steps }, `Step ${number} text`);
+    if (steps.length) this.save({ steps }, `Step ${number} text`);
+  }
+
+  /** Store booklet changes for the current scope (one undo step). */
+  private save(input: Record<string, unknown>, label: string) {
+    this.host.call('set_instructions', { ...(this.scope ? { group: this.scope } : {}), ...input }, label);
   }
 
   /** Text edited in place; saved on blur or Enter, Escape reverts. Shows a placeholder when empty. */

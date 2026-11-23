@@ -50,3 +50,13 @@ describe('MCP server serving the app (ADR 0026)', () => {
     }
   });
 });
+
+describe('MCP bridge when its port is taken', () => {
+  it('start() rejects with EADDRINUSE instead of crashing the process', async () => {
+    const second = new BridgeServer({ port: server.port!, origins: [], appDir: join(dir, 'app') });
+    await expect(second.start()).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    await second.close();
+    // The first server still works.
+    expect((await get('/')).status).toBe(200);
+  });
+});

@@ -165,6 +165,7 @@ How to use it:
 - **With Claude:** ask it to write the steps, e.g. *"write the build instructions in Serbian for a beginner"*. It sets the order and one short sentence per step, and the open booklet updates.
 - **Language:** the headings can be English or Srpski (the language menu).
 - **Names:** name your parts well ("Leg", "Shelf"), because the names appear in the booklet.
+- **Several pieces in one project** (a table and a stool): make each piece a group. Each group gets its own booklet, with its own letters, cut list and steps. Select a piece before clicking Instructions to open its booklet, or pick it from **Booklet for** in the booklet's toolbar (**Whole model** covers everything).
 
 ## Notes and dimensions
 

@@ -950,6 +950,45 @@ await page.screenshot({ path: `${outDir}/modeler-smoke.png` });
   check('the open booklet follows API changes (language)', kicker === 'Uputstvo za izradu', kicker);
   await tab.keyboard.press('Escape');
   check('Escape closes the booklet', (await tab.locator('.ins-overlay').count()) === 0);
+
+  // ADR 0027: two pieces of furniture (top-level groups), one booklet each.
+  await tab.evaluate(() => {
+    const app = window.modeler;
+    app.api.call('apply_operations', { label: 'Table and stool', operations: [
+      { name: 'group', input: { name: 'Table', target: { all: true } } },
+      { name: 'add_box', input: { name: 'Seat', size: [350, 350, 25], position: [1500, 0, 425], color: '#c8a165' }, as: 'seat' },
+      { name: 'add_box', input: { name: 'Stool leg', size: [40, 40, 425], position: [1510, 10, 0], color: '#8b5a2b' }, as: 'sl' },
+      { name: 'duplicate', input: { target: { ids: ['$sl'] }, pattern: { grid: { counts: [2, 2, 1], step: [290, 290, 0] } } }, as: 'sls' },
+      { name: 'group', input: { name: 'Stool', target: { ids: ['$seat', '$sl', '$sls'] } } },
+    ] });
+    app.api.call('set_selection', { target: { group: 'Stool' } });
+  });
+  await tab.getByRole('button', { name: /^Build instructions/ }).click();
+  await tab.waitForSelector('.ins-page');
+  const scoped = () => tab.evaluate(() => ({
+    title: document.querySelector('.ins-cover h1')?.textContent,
+    scope: document.querySelector('.ins-scope select')?.selectedOptions[0]?.textContent,
+    options: [...document.querySelectorAll('.ins-scope option')].map((o) => o.textContent).join('|'),
+    letters: [...document.querySelectorAll('.ins-part .ins-letter')].map((e) => e.textContent).join(''),
+  }));
+  let s = await scoped();
+  check('with a piece selected, Instructions opens that piece\'s booklet', s.title === 'Stool' && s.scope === 'Stool' && s.letters === 'AB' && s.options === 'Ceo model|Table|Stool', JSON.stringify(s));
+  const stepText = tab.locator('.ins-step-text').first();
+  await stepText.click();
+  await stepText.fill('Noge stolice.');
+  await tab.keyboard.press('Enter');
+  await tab.waitForTimeout(300);
+  const own = await tab.evaluate(() => {
+    const doc = window.modeler.doc;
+    const id = doc.groups.find((g) => g.name === 'Stool').id;
+    return { stool: doc.instructions?.groups?.[id]?.steps?.[0]?.text, whole: doc.instructions?.steps?.[0]?.text };
+  });
+  check('a step edited in a piece\'s booklet is stored for that piece only', own.stool === 'Noge stolice.' && own.whole === 'Screw the four legs A to the shelf.', JSON.stringify(own));
+  await tab.locator('.ins-scope select').selectOption({ label: 'Ceo model' });
+  await tab.waitForTimeout(300);
+  s = await scoped();
+  check('Booklet for → whole model shows every part again', s.title !== 'Stool' && s.letters.length > 3, JSON.stringify(s));
+  await tab.keyboard.press('Escape');
   await tab.close();
 }
 

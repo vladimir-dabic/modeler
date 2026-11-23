@@ -122,3 +122,58 @@ describe('build instructions: steps', () => {
     expect(data.parts[0]).toMatchObject({ letter: 'A', name: 'Leg', qty: 4, t_w_l: [50, 50, 400] });
   });
 });
+
+/** Two pieces of furniture in one project: the table as one group, a stool beside it as another. */
+function tableAndStool() {
+  const api = table();
+  ok(api.call('apply_operations', {
+    operations: [
+      { name: 'group', input: { name: 'Table', target: { all: true } } },
+      { name: 'add_box', input: { name: 'Seat', size: [350, 350, 25], position: [1500, 0, 425], color: '#c8a165' }, as: 'seat' },
+      { name: 'add_box', input: { name: 'Stool leg', size: [40, 40, 425], position: [1510, 10, 0], color: '#8b5a2b' }, as: 'sl' },
+      { name: 'duplicate', input: { target: { ids: ['$sl'] }, pattern: { grid: { counts: [2, 2, 1], step: [290, 290, 0] } } }, as: 'sls' },
+      { name: 'group', input: { name: 'Stool', target: { ids: ['$seat', '$sl', '$sls'] } } },
+    ],
+  }));
+  return api;
+}
+
+describe('build instructions: one booklet per piece of furniture', () => {
+  it('get_instructions for a group covers only its parts, titled after it', () => {
+    const api = tableAndStool();
+    const all = ok(api.call('get_instructions', {}));
+    expect(all.booklets).toMatch(/"Table", "Stool"/);
+    const stool = ok(api.call('get_instructions', { group: 'Stool' }));
+    expect(stool).toMatchObject({ group: 'Stool', title: 'Stool', size_mm: [350, 350, 450] });
+    expect(stool.parts.map((p: any) => `${p.qty}×${p.name}`)).toEqual(['4×Stool leg', '1×Seat']);
+    expect(stool.booklets).toBeUndefined();
+  });
+
+  it('set_instructions with group stores that booklet apart, inherits the language and keeps to its parts', () => {
+    const api = tableAndStool();
+    ok(api.call('set_instructions', { title: 'Sto i stolica', language: 'sr' }));
+    const data = ok(api.call('set_instructions', { group: 'Stool', steps: [{ parts: { name: '*leg*' }, text: 'Noge.' }, { parts: { name: 'Seat' } }] }));
+    expect(data.language).toBe('sr');
+    expect(data.steps).toEqual([{ n: 1, add: '4×A Stool leg', text: 'Noge.' }, { n: 2, add: '1×B Seat' }]);
+    const stoolId = api.doc.groups.find((g) => g.name === 'Stool')!.id;
+    expect(api.doc.instructions).toMatchObject({ title: 'Sto i stolica', language: 'sr', groups: { [stoolId]: { steps: [{ text: 'Noge.' }, {}] } } });
+    expect(api.doc.instructions!.steps).toBeUndefined(); // the whole-model booklet is untouched
+    // Survives save and open.
+    expect(parseDocumentFile(JSON.stringify(api.doc.toFile())).instructions).toEqual(api.doc.instructions);
+    // A step whose parts are all in another piece is an error.
+    const bad = api.call('set_instructions', { group: 'Stool', steps: [{ parts: { name: 'Shelf' } }] }) as any;
+    expect(bad.ok).toBe(false);
+    expect(bad.error.message).toMatch(/none of its parts are in "Stool"/);
+    // steps: null on the group goes back to suggested steps and drops the empty entry.
+    ok(api.call('set_instructions', { group: 'Stool', steps: null }));
+    expect(api.doc.instructions).toEqual({ title: 'Sto i stolica', language: 'sr' });
+  });
+
+  it('booklets are for top-level groups only', () => {
+    const api = tableAndStool();
+    ok(api.call('group', { name: 'Legs', target: { name: 'Leg*' } }));
+    const bad = api.call('get_instructions', { group: 'Legs' }) as any;
+    expect(bad.ok).toBe(false);
+    expect(bad.error.hint).toMatch(/"Table"/);
+  });
+});

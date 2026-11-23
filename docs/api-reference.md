@@ -578,9 +578,11 @@ Write the model for other 3D programs: GLB (binary glTF) for SketchUp (File > Im
 
 *read (no change)*
 
-The build-instructions booklet (IKEA style) the app prints: identical parts lettered A, B, C… with quantities and sizes (mm), and the assembly steps (stored, or suggested bottom-up). The user opens it with the Instructions button.
+The build-instructions booklet (IKEA style) the app prints: identical parts lettered A, B, C… with quantities and sizes (mm), and the assembly steps (stored, or suggested bottom-up). The user opens it with the Instructions button. A project with several pieces of furniture (top-level groups) has a booklet for each: pass group.
 
-No input.
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `group` | string |  | A top-level group (id or name): the booklet for that one piece of furniture, when a project holds several. Omit for the whole model. |
 
 ## paste
 
@@ -633,10 +635,11 @@ Say what parts are made of, for the cut list and the build booklet: material ("O
 
 *write (one undo step)*
 
-Write the build instructions: title, a short intro, language of the booklet headings (en, sr) and the assembly steps in order. Each step adds parts (a target, e.g. { name: "Leg*" }) with a short, plain-language text for a non-expert ("Screw the four legs B into the corners of the top A, 2 screws each."). Parts missing from every step are added as a last step. Only given fields change; steps: null goes back to suggested steps.
+Write the build instructions: title, a short intro, language of the booklet headings (en, sr) and the assembly steps in order. Each step adds parts (a target, e.g. { name: "Leg*" }) with a short, plain-language text for a non-expert ("Screw the four legs B into the corners of the top A, 2 screws each."). Parts missing from every step are added as a last step. Only given fields change; steps: null goes back to suggested steps. With group, it writes that piece's own booklet, and steps only take parts inside it.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
+| `group` | string |  | A top-level group (id or name): the booklet for that one piece of furniture, when a project holds several. Omit for the whole model. |
 | `title` | string |  |  |
 | `intro` | string \| null |  | One or two sentences under the title; null removes it |
 | `language` | "en" \| "sr" |  | Language of the booklet headings; write texts in the same language |

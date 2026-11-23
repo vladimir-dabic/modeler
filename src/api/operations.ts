@@ -9,7 +9,7 @@ import { exportStl, parseDocumentFile } from '../model/io';
 import { exportGlb } from '../model/gltf';
 import { instantiateClip, parseClip, pasteOffset } from '../model/clipboard';
 import { applyDefinition, bandingText, definitionKey, type PropertyField } from '../model/parts';
-import { INSTRUCTION_LANGUAGES, resolveInstructions, type Instructions, type InstructionsLanguage } from '../model/instructions';
+import { bookletGroups, INSTRUCTION_LANGUAGES, instructionScope, resolveInstructions, storedInstructions, withInstructions, type Instructions, type InstructionsLanguage } from '../model/instructions';
 import { DRAWING_UNITS, DRAWING_UNIT_MM, localBounds, referenceMatrix } from '../model/references';
 import { cleanNumber, cleanVec, DEG, mirrorEntity, rotateEntityAbout, worldBounds } from '../model/geometry';
 import { commonParentGroup, groupChain, groupMembers } from '../model/groups';
@@ -1483,10 +1483,31 @@ const deleteAnnotations = def({
 
 const InstructionText = z.string().trim().min(1).max(600);
 
-function instructionsSummary(ctx: OperationContext) {
-  const r = resolveInstructions(ctx.doc.entities, ctx.doc.instructions);
+const BookletGroup = z
+  .string()
+  .min(1)
+  .optional()
+  .describe('A top-level group (id or name): the booklet for that one piece of furniture, when a project holds several. Omit for the whole model.');
+
+/** The top-level group a booklet is for, or null for the whole model. */
+function bookletGroup(ctx: OperationContext, ref: string | undefined): string | null {
+  if (!ref) return null;
+  const g = ctx.group(ref);
+  if (g.parentId) {
+    const top = groupChain(g.id, ctx.doc.groups).at(-1)!;
+    throw new ApiError('invalid_input', `"${g.name}" is inside "${top.name}"`, `Booklets are made for top-level groups; use "${top.name}".`, 'group');
+  }
+  return g.id;
+}
+
+function instructionsSummary(ctx: OperationContext, groupId: string | null) {
+  const { doc } = ctx;
+  const group = groupId ? doc.getGroup(groupId)! : null;
+  const r = resolveInstructions(instructionScope(doc.entities, doc.groups, groupId), storedInstructions(doc.instructions, groupId), group?.name);
   const types = new Map(r.parts.map((t) => [t.letter, t]));
+  const pieces = groupId ? [] : bookletGroups(doc.entities, doc.groups);
   return {
+    ...(group ? { group: group.name } : {}),
     title: r.title,
     ...(r.intro ? { intro: r.intro } : {}),
     language: r.language,
@@ -1500,6 +1521,9 @@ function instructionsSummary(ctx: OperationContext) {
     })),
     ...(r.warnings.length ? { warnings: r.warnings } : {}),
     ...(r.suggested ? { hint: 'These steps are suggested bottom-up. Store a better order with a short text per step using set_instructions.' } : {}),
+    ...(pieces.length > 1
+      ? { booklets: `This booklet covers the whole model. If the top-level groups are separate pieces of furniture, pass group for a booklet each: ${pieces.map((g) => `"${g.name}"`).join(', ')}.` }
+      : {}),
   };
 }
 
@@ -1507,10 +1531,10 @@ const getInstructions = def({
   name: 'get_instructions',
   kind: 'read',
   description:
-    'The build-instructions booklet (IKEA style) the app prints: identical parts lettered A, B, C… with quantities and sizes (mm), and the assembly steps (stored, or suggested bottom-up). The user opens it with the Instructions button.',
-  input: z.strictObject({}),
-  run(ctx) {
-    return instructionsSummary(ctx);
+    'The build-instructions booklet (IKEA style) the app prints: identical parts lettered A, B, C… with quantities and sizes (mm), and the assembly steps (stored, or suggested bottom-up). The user opens it with the Instructions button. A project with several pieces of furniture (top-level groups) has a booklet for each: pass group.',
+  input: z.strictObject({ group: BookletGroup }),
+  run(ctx, input) {
+    return instructionsSummary(ctx, bookletGroup(ctx, input.group));
   },
 });
 
@@ -1518,8 +1542,9 @@ const setInstructions = def({
   name: 'set_instructions',
   kind: 'write',
   description:
-    'Write the build instructions: title, a short intro, language of the booklet headings (en, sr) and the assembly steps in order. Each step adds parts (a target, e.g. { name: "Leg*" }) with a short, plain-language text for a non-expert ("Screw the four legs B into the corners of the top A, 2 screws each."). Parts missing from every step are added as a last step. Only given fields change; steps: null goes back to suggested steps.',
+    'Write the build instructions: title, a short intro, language of the booklet headings (en, sr) and the assembly steps in order. Each step adds parts (a target, e.g. { name: "Leg*" }) with a short, plain-language text for a non-expert ("Screw the four legs B into the corners of the top A, 2 screws each."). Parts missing from every step are added as a last step. Only given fields change; steps: null goes back to suggested steps. With group, it writes that piece\'s own booklet, and steps only take parts inside it.',
   input: z.strictObject({
+    group: BookletGroup,
     title: z.string().trim().min(1).max(120).optional(),
     intro: InstructionText.nullable().optional().describe('One or two sentences under the title; null removes it'),
     language: z.enum(INSTRUCTION_LANGUAGES as [InstructionsLanguage, ...InstructionsLanguage[]]).optional().describe('Language of the booklet headings; write texts in the same language'),
@@ -1531,7 +1556,11 @@ const setInstructions = def({
       .optional(),
   }),
   run(ctx, input) {
-    const next: Instructions = { ...(ctx.doc.instructions ?? {}) };
+    const groupId = bookletGroup(ctx, input.group);
+    const inScope = new Set(instructionScope(ctx.doc.entities, ctx.doc.groups, groupId).map((e) => e.id));
+    const current = groupId ? ctx.doc.instructions?.groups?.[groupId] : ctx.doc.instructions;
+    const next: Instructions = { ...(current ?? {}) };
+    delete next.groups;
     if (input.title !== undefined) next.title = input.title;
     if (input.intro === null) delete next.intro;
     else if (input.intro !== undefined) next.intro = input.intro;
@@ -1540,12 +1569,15 @@ const setInstructions = def({
     else if (input.steps) {
       next.steps = input.steps.map((s, i) => {
         if (!s.parts && !s.text) throw new ApiError('invalid_input', `Step ${i + 1} has neither parts nor text`, undefined, `steps.${i}`);
-        const parts = s.parts ? ctx.resolve(s.parts).filter((e) => !e.hole).map((e) => e.id) : [];
+        const parts = s.parts ? ctx.resolve(s.parts).filter((e) => !e.hole && inScope.has(e.id)).map((e) => e.id) : [];
+        if (s.parts && !parts.length && !s.text) {
+          throw new ApiError('invalid_input', `Step ${i + 1}: none of its parts are in "${ctx.doc.getGroup(groupId!)!.name}"`, 'Target parts inside the group: { in_group: "<group>" }, or their ids or names.', `steps.${i}.parts`);
+        }
         return { parts, ...(s.text ? { text: s.text } : {}) };
       });
     }
-    ctx.doc.setInstructions(Object.keys(next).length ? next : null);
-    return instructionsSummary(ctx);
+    ctx.doc.setInstructions(withInstructions(ctx.doc.instructions, groupId, Object.keys(next).length ? next : null, ctx.doc.groups));
+    return instructionsSummary(ctx, groupId);
   },
 });
 

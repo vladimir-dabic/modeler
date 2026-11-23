@@ -117,7 +117,7 @@ type Target =
 
 ## Build instructions
 
-- `get_instructions` / `set_instructions { title?, intro?, language?, steps? }` ([ADR 0021](adr/0021-build-instructions-booklet.md)). Letters, quantities and pictures are derived from the model; only the title, intro, language and step order with texts are stored. A step is `{ parts?: target, text? }`; `steps: null` goes back to the suggested bottom-up steps.
+- `get_instructions` / `set_instructions { title?, intro?, language?, steps? }` ([ADR 0021](adr/0021-build-instructions-booklet.md)). Letters, quantities and pictures are derived from the model; only the title, intro, language and step order with texts are stored. A step is `{ parts?: target, text? }`; `steps: null` goes back to the suggested bottom-up steps. Both take `group` (a top-level group, id or name) for the booklet of one piece of furniture in a project with several ([ADR 0027](adr/0027-one-booklet-per-piece-of-furniture.md)); steps then only take parts inside it.
 
 ## Annotations
 

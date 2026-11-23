@@ -51,6 +51,7 @@ import { icon } from './ui/icons';
 import { ProjectFiles, type OpenedFile, type FileHandle } from './ui/ProjectFiles';
 import { ContextMenu, type MenuItem } from './ui/ContextMenu';
 import { InstructionsView } from './ui/InstructionsView';
+import { bookletGroups } from './model/instructions';
 import { NewProjectDialog } from './ui/NewProjectDialog';
 import { TabSession } from './ui/TabSession';
 import { ShortcutsDialog } from './ui/ShortcutsDialog';
@@ -810,7 +811,7 @@ export class App {
       'file.saveAs': () => void this.save(true),
       'file.exportStl': () => this.exportStl(),
       'file.exportGlb': () => this.exportGlb(),
-      'file.instructions': () => (this.instructions.isOpen ? this.instructions.close() : this.instructions.open()),
+      'file.instructions': () => (this.instructions.isOpen ? this.instructions.close() : this.instructions.open(this.bookletGroupForSelection())),
       'file.importDxf': () => void this.importDxf(),
       'file.exportCutList': () => this.exportCutList(),
       'help.shortcuts': () => this.shortcuts.toggle(),
@@ -1199,6 +1200,18 @@ export class App {
     this.els.undo.disabled = f > 0 || !this.doc.canUndo;
     this.els.redo.disabled = f > 0 || !this.doc.canRedo;
     this.sidebar.setLocked(f > 0);
+  }
+
+  /**
+   * The piece of furniture the booklet opens for: the top-level group holding the selection,
+   * when the project has several pieces (top-level groups). Otherwise the whole model.
+   */
+  private bookletGroupForSelection(): string | null {
+    const { doc } = this;
+    if (bookletGroups(doc.entities, doc.groups).length < 2) return null;
+    const tops = new Set(doc.selected().map((e) => groupChain(e.groupId, doc.groups).at(-1)?.id ?? ''));
+    const [top] = tops;
+    return tops.size === 1 && top ? top : null;
   }
 
   /** Split the selection horizontally through its middle, with pegs (the API does the work). */

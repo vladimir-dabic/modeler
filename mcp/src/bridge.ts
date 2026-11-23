@@ -88,6 +88,9 @@ export class BridgeServer {
         verifyClient: (info: { origin: string; req: IncomingMessage }) => this.allowed(info.origin, info.req),
       });
       wss.on('connection', (socket) => this.accept(socket));
+      // A WebSocketServer re-emits its http server's errors (e.g. EADDRINUSE); without a
+      // listener that would crash the process instead of letting start() report it.
+      wss.on('error', () => {});
       http.once('error', reject);
       http.listen(this.opts.port, '127.0.0.1', () => {
         this.http = http;

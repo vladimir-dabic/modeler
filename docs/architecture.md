@@ -95,6 +95,8 @@ Imported plans (DXF) to trace and snap to. They are **not part of the model**: n
 
 Build instructions live in `doc.instructions`: only the title, intro, language and step order with texts. Letters, quantities and pictures are derived when the booklet opens (`src/model/instructions.ts`, `src/viewport/InstructionImages.ts`, `src/ui/InstructionsView.ts`).
 
+A project with several pieces of furniture has a booklet per top-level group ([ADR 0027](adr/0027-one-booklet-per-piece-of-furniture.md)), stored in `doc.instructions.groups[groupId]`. `instructionScope` picks the group's parts (plus all holes), `storedInstructions` the group's stored booklet (inheriting the project language) and `withInstructions` writes one back.
+
 ### Annotations ([ADR 0015](adr/0015-annotations-notes-and-dimensions.md))
 
 Notes and dimensions in `doc.annotations`. They're snapshotted (one undo step per change), saved in the file, never geometry.

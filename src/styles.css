@@ -1584,6 +1584,14 @@ kbd {
   flex: 1;
 }
 
+.ins-scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  color: var(--muted);
+}
+
 .ins-pages {
   flex: 1;
   overflow: auto;

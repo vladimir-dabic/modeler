@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { localBounds, worldBounds } from './geometry';
+import { groupMembers } from './groups';
 import { bandingText } from './parts';
-import type { EdgeBanding, Entity } from './types';
+import type { EdgeBanding, Entity, Group } from './types';
 
 /**
  * Build instructions (ADR 0021): an IKEA-style booklet made from the model. DOM-free.
@@ -29,6 +30,50 @@ export interface Instructions {
   language?: InstructionsLanguage;
   /** Absent: steps are suggested from the model. */
   steps?: InstructionStep[];
+  /**
+   * Booklets for single pieces of furniture in a project with several: one per top-level
+   * group, keyed by group id. Only on the whole-model instructions, never nested deeper.
+   */
+  groups?: Record<string, Instructions>;
+}
+
+// ---- scope: the whole model, or one top-level group -------------------------------------------
+
+/** Top-level groups that hold at least one visible solid: the pieces a booklet can be made for. */
+export function bookletGroups(entities: Entity[], groups: Group[]): Group[] {
+  return groups.filter((g) => !g.parentId && instructionSolids(groupMembers(g.id, entities, groups)).length > 0);
+}
+
+/** The entities a booklet covers: the group's members (any depth) plus every hole, which may cut them. */
+export function instructionScope(entities: Entity[], groups: Group[], groupId: string | null): Entity[] {
+  if (!groupId) return entities;
+  const members = new Set(groupMembers(groupId, entities, groups).map((e) => e.id));
+  return entities.filter((e) => members.has(e.id) || e.hole);
+}
+
+/** The stored instructions for a scope. A group's booklet takes the project's language until it sets its own. */
+export function storedInstructions(all: Instructions | null, groupId: string | null): Instructions | null {
+  if (!groupId) return all;
+  const own = all?.groups?.[groupId];
+  const language = own?.language ?? all?.language;
+  return own || language ? { ...own, ...(language ? { language } : {}) } : null;
+}
+
+/** `all` with the instructions for `groupId` (or the whole model) replaced; drops entries of deleted groups. */
+export function withInstructions(all: Instructions | null, groupId: string | null, next: Instructions | null, groups: Group[]): Instructions | null {
+  const out: Instructions = groupId ? { ...all } : { ...next, ...(all?.groups ? { groups: all.groups } : {}) };
+  if (groupId) {
+    const map = { ...out.groups };
+    if (next && Object.keys(next).length) map[groupId] = next;
+    else delete map[groupId];
+    out.groups = map;
+  }
+  if (out.groups) {
+    const live = new Set(groups.map((g) => g.id));
+    out.groups = Object.fromEntries(Object.entries(out.groups).filter(([id]) => live.has(id)));
+    if (!Object.keys(out.groups).length) delete out.groups;
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 export interface PartType {
@@ -192,7 +237,7 @@ function countLetters(ids: string[], letterOf: Map<string, string>): { letter: s
 const MAX_TEXT = 600;
 
 /** Validate stored instructions from untrusted JSON. */
-export function parseInstructions(raw: unknown): Instructions | null {
+export function parseInstructions(raw: unknown, nested = false): Instructions | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const text = (v: unknown, max = MAX_TEXT) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined);
@@ -210,5 +255,14 @@ export function parseInstructions(raw: unknown): Instructions | null {
     ...(INSTRUCTION_LANGUAGES.includes(r.language as InstructionsLanguage) ? { language: r.language as InstructionsLanguage } : {}),
     ...(steps?.length ? { steps } : {}),
   };
+  if (!nested && r.groups && typeof r.groups === 'object' && !Array.isArray(r.groups)) {
+    const groups = Object.fromEntries(
+      Object.entries(r.groups as Record<string, unknown>).flatMap(([id, g]) => {
+        const parsed = id ? parseInstructions(g, true) : null;
+        return parsed ? [[id, parsed]] : [];
+      }),
+    );
+    if (Object.keys(groups).length) out.groups = groups;
+  }
   return Object.keys(out).length ? out : null;
 }
