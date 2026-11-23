@@ -40,5 +40,13 @@
   },
   "private": true,
   "type": "module",
-  "license": "AGPL-3.0-only"
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vladimir-dabic/modeler.git"
+  },
+  "homepage": "https://github.com/vladimir-dabic/modeler#readme",
+  "bugs": {
+    "url": "https://github.com/vladimir-dabic/modeler/issues"
+  }
 }
