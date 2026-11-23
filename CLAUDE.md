@@ -1,14 +1,14 @@
 # Modeler: notes for working on this repo
 
-SketchUp-style browser modeler (Vite + TS + Three.js, no UI framework). **Read [docs/README.md](docs/README.md) first.** Architecture: [docs/architecture.md](docs/architecture.md). Decisions: [docs/adr/](docs/adr/README.md).
+Prompt-first browser modeler for makers (Vite + TS + Three.js, no UI framework). **Read [README.md](README.md) first.** Architecture: [docs/architecture.md](docs/architecture.md). Decisions: `docs/adr/` (local only, see below).
 
 **Local-only docs:** `docs/adr/` (decisions) and `docs/roadmap.md` (plans) are git-ignored; they live on the maintainer's machine and are not in the repo or its history. Keep writing ADRs there as before; links to them from the other docs resolve only locally.
 
-Audience: hobbyists, home makers and semi-pros who prompt Claude from an idea to a build. Not a SketchUp competitor: make it buildable (parts, hardware, checks, cut list, drawings) before making it richer ([ADR 0024](docs/adr/0024-product-focus-prompt-first-making.md)).
+Audience: hobbyists, home makers and semi-pros who prompt Claude from an idea to a build. Not a SketchUp competitor: make it buildable (parts, hardware, checks, cut list, drawings) before making it richer (ADR 0024).
 
 ## Guiding principle: the modeler is an API
 
-The UI, the in-app AI assistant and the MCP server are all clients of one typed, validated **Modeler API** in `src/api` ([ADR 0008](docs/adr/0008-modeler-api-single-entry-point.md), design: [docs/modeler-api.md](docs/modeler-api.md), generated reference: [docs/api-reference.md](docs/api-reference.md)).
+The UI, the in-app AI assistant and the MCP server are all clients of one typed, validated **Modeler API** in `src/api` (ADR 0008, design: [docs/modeler-api.md](docs/modeler-api.md), generated reference: [docs/api-reference.md](docs/api-reference.md)).
 - New model-changing features start as an API operation (schema + AI-readable description + run + tests), then get UI on top via `app.uiCall`. After changing operations run `npm run docs:api` (a test fails if the reference is stale).
 - Keep it token-efficient (ADR 0010): selectors, patterns, intent-level operations, compact results.
 - Keep `src/model`, `src/api` and `src/bridge/protocol.ts` DOM-free: the MCP server runs them in Node.

@@ -40,6 +40,8 @@ export async function buildMcp({ withApp = false } = {}) {
     rmSync(join(repo, 'mcp/dist/app'), { recursive: true, force: true });
     cpSync(join(repo, 'dist'), join(repo, 'mcp/dist/app'), { recursive: true });
   }
+  // The package page shows the root README; the license files travel with the package (ADR 0026).
+  if (withApp) for (const f of ['README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md']) copyFileSync(join(repo, f), join(repo, 'mcp', f));
 }
 
 // Run directly (npm run build:mcp).

@@ -16,13 +16,13 @@ npm run dev          # http://localhost:5173 (hot reload)
 | `npm run smoke` | end-to-end test: drives the real UI in headless Chrome. **Needs `npm run dev` running.** Screenshots go to `test-results/` (ignored); `node scripts/smoke.mjs <dir>` writes elsewhere |
 | `npm run typecheck` | `tsc --noEmit` over `src`, `tests`, `mcp/src`, `vite.config.ts` |
 | `npm run build` | type-check + production build into `dist/` |
-| `npm run bench:csg` | old vs new geometry engine on representative scenes → `test-results/csg-bench.md` ([ADR 0017](adr/0017-manifold-geometry-engine.md)) |
+| `npm run bench:csg` | old vs new geometry engine on representative scenes → `test-results/csg-bench.md` (ADR 0017) |
 | `npm run docs:api` | regenerate `docs/api-reference.md` from the operation definitions |
-| `npm run build:mcp` | bundle the MCP server into `mcp/dist/modeler-mcp.mjs`. Usually not needed: `mcp/run.mjs` (what Claude runs) rebuilds when sources changed. A *running* server keeps its old code until it's restarted (`/mcp` → Reconnect). See [mcp/README.md](../mcp/README.md#managing-the-server) |
+| `npm run build:mcp` | bundle the MCP server into `mcp/dist/modeler-mcp.mjs`. Usually not needed: `mcp/run.mjs` (what Claude runs) rebuilds when sources changed. A *running* server keeps its old code until it's restarted (`/mcp` → Reconnect). See [docs/mcp.md](../docs/mcp.md#managing-the-server) |
 
 `window.modeler` is the live `App` instance in the browser console. It's useful for debugging (`modeler.doc.entities`, `modeler.viewport.zoomExtents()`) and is what the smoke test uses.
 
-## Packaging and release ([ADR 0026](adr/0026-one-repo-mcp-package-serves-the-app.md))
+## Packaging and release (ADR 0026)
 
 One repo, one product version (`mcp/package.json`). The npm package `modeler-mcp` is the MCP server with the built app inside, served on the bridge port.
 
@@ -112,4 +112,4 @@ Add the field to `WorkspaceConfig` in `src/model/workspaces.ts`, fill it for all
 
 ### Record a decision
 
-Copy [adr/0000-template.md](adr/0000-template.md) to the next number, fill it in, and add it to the index in [adr/README.md](adr/README.md).
+Copy adr/0000-template.md to the next number, fill it in, and add it to the index in adr/README.md.

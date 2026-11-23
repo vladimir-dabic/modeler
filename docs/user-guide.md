@@ -211,7 +211,7 @@ Supported: lines, polylines (including arcs), circles, arcs, ellipses, splines, 
 
 ## AI (Connect AI)
 
-Claude can build and edit your model through the **modeler MCP server** (setup: [mcp/README.md](../mcp/README.md)).
+Claude can build and edit your model through the **modeler MCP server** (setup: [docs/mcp.md](mcp.md)).
 
 1. Add the server to Claude Code or Claude Desktop (one-time).
 2. Click **Connect AI** in the top bar. The button pulses (*Waiting for AI…*) until the server is running, then turns green (*AI connected*).

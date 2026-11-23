@@ -18,7 +18,7 @@
     "check:pack": "npm run pack:mcp && node scripts/pack-check.mjs",
     "release:mcp": "npm run build:release && npm publish ./mcp"
   },
-  "description": "Simple SketchUp-style 3D modeler for 3D printing and woodworking",
+  "description": "Prompt-first 3D modeler for makers: furniture, metal frames and 3D-printed parts, with an MCP server for Claude and other AI clients",
   "dependencies": {
     "manifold-3d": "^3.5.4",
     "three": "^0.187.0",
@@ -39,5 +39,6 @@
     "ws": "^8.22.2"
   },
   "private": true,
-  "type": "module"
+  "type": "module",
+  "license": "AGPL-3.0-only"
 }

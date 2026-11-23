@@ -10,11 +10,25 @@
     "dist/modeler-mcp.mjs",
     "dist/manifold.wasm",
     "dist/app",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "engines": {
     "node": ">=20"
   },
-  "keywords": ["mcp", "model-context-protocol", "3d", "cad", "modeler", "woodworking", "3d-printing", "claude"],
-  "license": "UNLICENSED"
+  "keywords": [
+    "3d",
+    "3d-printing",
+    "cad",
+    "claude",
+    "cut-list",
+    "diy",
+    "furniture",
+    "mcp",
+    "model-context-protocol",
+    "modeler",
+    "woodworking"
+  ],
+  "license": "AGPL-3.0-only"
 }

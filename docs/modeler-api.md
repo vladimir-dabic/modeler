@@ -1,6 +1,6 @@
 # Modeler API
 
-> **Status:** implemented in `src/api` ([ADR 0008](adr/0008-modeler-api-single-entry-point.md), [ADR 0010](adr/0010-token-efficient-api.md)). Every operation with all its fields is listed in the generated **[API reference](api-reference.md)**. This page explains the design and conventions.
+> **Status:** implemented in `src/api` (ADR 0008, ADR 0010). Every operation with all its fields is listed in the generated **[API reference](api-reference.md)**. This page explains the design and conventions.
 
 The Modeler API is the **single way to change the model**: a set of named, typed, validated **operations** on a `ModelDocument`. Three kinds of client use exactly the same operations:
 
@@ -8,7 +8,7 @@ The Modeler API is the **single way to change the model**: a set of named, typed
 |---|---|
 | UI (sidebar, commands, right-click menu) | `app.uiCall('set_hole', {...}, 'Make hole')`, a thin wrapper over `api.call` that turns errors into toasts |
 | In-app AI assistant (planned) | as Claude **tools**: `api.toolDefinitions()` |
-| MCP server (planned) | as MCP **tools**: same names, schemas and descriptions |
+| MCP server | as MCP **tools**: same names, schemas and descriptions |
 
 If a capability exists for one client, it exists for all of them. A model-changing feature isn't done until it's an operation.
 
@@ -54,7 +54,7 @@ api.toolDefinitions();                                     // [{ name, descripti
 | `write` | one transaction / undo step; validated; rolled back on error; returns `{ ids }` |
 | `settings` | document settings that are saved but not undoable (`set_workspace`, `set_printer`); the app reacts via `doc.onSettingsChange` |
 | `history` | `undo`, `redo` |
-| `host` | needs a host capability, called with `callAsync`: `render_views` (`host.renderViews`, the app), `open_file` / `save_file` / `export_stl` / `export_model` / `import_dxf { path }` (`host.files`, only the MCP server, limited to its working folder: [ADR 0013](adr/0013-mcp-server-bridge-and-files.md)). Without the capability they return `unsupported` |
+| `host` | needs a host capability, called with `callAsync`: `render_views` (`host.renderViews`, the app), `open_file` / `save_file` / `export_stl` / `export_model` / `import_dxf { path }` (`host.files`, only the MCP server, limited to its working folder: ADR 0013). Without the capability they return `unsupported` |
 
 ### Results
 
@@ -96,32 +96,32 @@ type Target =
 
 ## Views
 
-- `explode_view { factor 0–1, axis? }` (host, app only) shows the model pulled apart: every part, assemblies (groups) kept side by side as clusters ([ADR 0022](adr/0022-exploded-view-all-parts.md)). View state only: no undo step, nothing saved.
+- `explode_view { factor 0–1, axis? }` (host, app only) shows the model pulled apart: every part, assemblies (groups) kept side by side as clusters (ADR 0022). View state only: no undo step, nothing saved.
 - `render_views { views?, size?, explode?, explode_axis? }` can render exploded images without changing the user's view.
 
 ## Printing
 
-- `set_hole { target, hole, only_own_group? }`: `only_own_group: true` scopes a hole to its group ([ADR 0018](adr/0018-print-workflow-fuse-scope-split.md)).
+- `set_hole { target, hole, only_own_group? }`: `only_own_group: true` scopes a hole to its group (ADR 0018).
 - `split_for_print { target, axis?, at?, gap?, pegs?, peg_diameter?, peg_depth?, clearance?, name? }` replaces the target with two parametric pieces with pegs and clearance holes. The result lists the pieces, the peg count and size, and `notes` if pegs had to shrink or didn't fit.
-- `export_model` writes GLB for other 3D programs: separate named parts (not fused), groups as nested nodes, metres Y-up ([ADR 0020](adr/0020-glb-export-own-writer.md)).
+- `export_model` writes GLB for other 3D programs: separate named parts (not fused), groups as nested nodes, metres Y-up (ADR 0020).
 - `export_stl` writes one fused, watertight solid. The `check_print` / `get_quantities` totals count overlapping parts once.
 
 ## Components and part properties
 
-- `make_component { target, match? }` links identical parts as copies of one component: editing the shape, colour or properties of one edits all; each keeps its place, name and group. `make_unique { target }` unlinks ([ADR 0025](adr/0025-components-and-part-properties.md)).
+- `make_component { target, match? }` links identical parts as copies of one component: editing the shape, colour or properties of one edits all; each keeps its place, name and group. `make_unique { target }` unlinks (ADR 0025).
 - `set_properties { target, material?, finish?, banding?, part_no?, note? }` (null clears) says what parts are made of; the cut list, booklet and GLB use it.
 
 ## Clipboard
 
-- `paste { data, offset? }` inserts parts copied with ⌘C (JSON text, format `modeler-clipboard`): new ids, whole groups and attached notes kept, in place or beside the model ([ADR 0023](adr/0023-clipboard-tabs-new-project.md)). Copying itself is UI-only (`copyParts` in `src/model/clipboard.ts`).
+- `paste { data, offset? }` inserts parts copied with ⌘C (JSON text, format `modeler-clipboard`): new ids, whole groups and attached notes kept, in place or beside the model (ADR 0023). Copying itself is UI-only (`copyParts` in `src/model/clipboard.ts`).
 
 ## Build instructions
 
-- `get_instructions` / `set_instructions { title?, intro?, language?, steps? }` ([ADR 0021](adr/0021-build-instructions-booklet.md)). Letters, quantities and pictures are derived from the model; only the title, intro, language and step order with texts are stored. A step is `{ parts?: target, text? }`; `steps: null` goes back to the suggested bottom-up steps. Both take `group` (a top-level group, id or name) for the booklet of one piece of furniture in a project with several ([ADR 0027](adr/0027-one-booklet-per-piece-of-furniture.md)); steps then only take parts inside it.
+- `get_instructions` / `set_instructions { title?, intro?, language?, steps? }` (ADR 0021). Letters, quantities and pictures are derived from the model; only the title, intro, language and step order with texts are stored. A step is `{ parts?: target, text? }`; `steps: null` goes back to the suggested bottom-up steps. Both take `group` (a top-level group, id or name) for the booklet of one piece of furniture in a project with several (ADR 0027); steps then only take parts inside it.
 
 ## Annotations
 
-Notes and dimensions ([ADR 0015](adr/0015-annotations-notes-and-dimensions.md)). A point is `[x, y, z]`, or `{ part, at }` with `at` = fractions of the part's own box (`[0.5, 0.5, 1]`, top centre, is the default). Points on parts keep the annotation attached.
+Notes and dimensions (ADR 0015). A point is `[x, y, z]`, or `{ part, at }` with `at` = fractions of the part's own box (`[0.5, 0.5, 1]`, top centre, is the default). Points on parts keep the annotation attached.
 
 | Operation | |
 |---|---|
@@ -135,7 +135,7 @@ Notes and dimensions ([ADR 0015](adr/0015-annotations-notes-and-dimensions.md)).
 
 ## Reference drawings
 
-Imported plans the model is built on ([ADR 0014](adr/0014-exchange-formats-and-reference-drawings.md)). They are not parts, so selectors never match them.
+Imported plans the model is built on (ADR 0014). They are not parts, so selectors never match them.
 
 | Operation | |
 |---|---|

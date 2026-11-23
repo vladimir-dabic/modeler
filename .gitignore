@@ -34,3 +34,8 @@ Thumbs.db
 # Odluke (ADR) i plan rade samo lokalno; nisu u gitu
 docs/adr/
 docs/roadmap.md
+
+# Copies made into the npm package at build time (mcp/build.mjs --with-app)
+mcp/README.md
+mcp/LICENSE
+mcp/THIRD_PARTY_NOTICES.md

@@ -1,6 +1,6 @@
 # AI integration
 
-> **Status:** the Modeler API ([modeler-api.md](modeler-api.md), [api-reference.md](api-reference.md)) and the **MCP server** ([mcp/README.md](../mcp/README.md)) are **implemented**. The in-app panel is **on hold**. Decisions: [ADR 0009](adr/0009-ai-assistant-in-app-and-mcp.md), [ADR 0013](adr/0013-mcp-server-bridge-and-files.md).
+> **Status:** the Modeler API ([modeler-api.md](modeler-api.md), [api-reference.md](api-reference.md)) and the **MCP server** ([docs/mcp.md](mcp.md)) are **implemented**. The in-app panel is **on hold**. Decisions: ADR 0009, ADR 0013.
 
 There will be two ways to model with AI, and both drive the same Modeler API operations:
 
@@ -80,7 +80,7 @@ These are current guidance; re-check the Claude API docs (the `claude-api` skill
 ### System prompt (per workspace)
 
 The text lives in code, in `src/api/guide.ts` (`CORE_GUIDE`, `WORKSPACE_GUIDES`). The MCP server already sends it as its instructions. A stable core plus a workspace section:
-- **Core:** units are mm, Z-up. Express a whole intent in one call: selectors, patterns, `place`/`distribute`, and `apply_operations` with `$refs` ([ADR 0010](adr/0010-token-efficient-api.md)). Read with `get_scene { detail: 'outline' }` first on big models. Verify with the returned bounds/warnings, and use `render_views` when shape or alignment matters. Ask before deleting many parts. Name parts meaningfully, because names appear in cut lists.
+- **Core:** units are mm, Z-up. Express a whole intent in one call: selectors, patterns, `place`/`distribute`, and `apply_operations` with `$refs` (ADR 0010). Read with `get_scene { detail: 'outline' }` first on big models. Verify with the returned bounds/warnings, and use `render_views` when shape or alignment matters. Ask before deleting many parts. Name parts meaningfully, because names appear in cut lists.
 - **Print:** bed size. Typical clearances: ~0.2 mm for sliding fits, 0.1 mm for press fits. Minimum wall ~1.2 mm (3 perimeters at 0.4 mm nozzle). Avoid unsupported overhangs > 45°. Holes for M3 ≈ Ø3.2–3.4.
 - **Workshop:** standard sheet thicknesses (18/12/6 mm ply, 3/4"). Name every board. Real joinery allowances.
 - **Build:** cm display, typical wall 25 cm, door 90 × 210 cm, ceiling 250–270 cm. Openings are holes.
@@ -91,7 +91,7 @@ Rough: a few cents for a small edit, around 10–30 cents for a multi-step build
 
 ## MCP server
 
-> **Implemented.** Setup and options: [mcp/README.md](../mcp/README.md). Decisions: [ADR 0013](adr/0013-mcp-server-bridge-and-files.md).
+> **Implemented.** Setup and options: [docs/mcp.md](mcp.md). Decisions: ADR 0013.
 
 The server (`mcp/src`, bundled to `mcp/dist/modeler-mcp.mjs` by `npm run build:mcp`) exposes **the same operations** as MCP tools: same names, same JSON Schemas, same descriptions (`ModelerApi.toolDefinitions({ includeHostOps: true })`). It adds one tool of its own, `connection_status`. Its MCP `instructions` are the shared guide in `src/api/guide.ts` (core + all workspaces), plus a note on the two modes.
 

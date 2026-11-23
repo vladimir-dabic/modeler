@@ -1,6 +1,6 @@
 # Architecture
 
-Vite + TypeScript + Three.js, no UI framework ([ADR 0003](adr/0003-vanilla-typescript-threejs.md)). Boolean operations (holes) are done by the **Manifold** WebAssembly engine, with `three-bvh-csg` as the fallback ([ADR 0017](adr/0017-manifold-geometry-engine.md)). About 6k lines of TypeScript.
+Vite + TypeScript + Three.js, no UI framework (ADR 0003). Boolean operations (holes) are done by the **Manifold** WebAssembly engine, with `three-bvh-csg` as the fallback (ADR 0017). About 6k lines of TypeScript.
 
 ## Layers
 
@@ -31,7 +31,7 @@ flowchart TB
   Doc --- Geo
 ```
 
-**Rule of thumb:** the model layer knows nothing about the screen. The view layer renders the model and answers "what's under the cursor?". Clients change the model only through the API ([ADR 0008](adr/0008-modeler-api-single-entry-point.md)).
+**Rule of thumb:** the model layer knows nothing about the screen. The view layer renders the model and answers "what's under the cursor?". Clients change the model only through the API (ADR 0008).
 
 ### Who changes the model, and how
 
@@ -46,7 +46,7 @@ flowchart TB
 
 ## Key concepts
 
-### Entities ([ADR 0001](adr/0001-parametric-entities-mm-z-up.md))
+### Entities (ADR 0001)
 
 `src/model/types.ts`. Every part is one of:
 
@@ -63,17 +63,17 @@ Holes have two optional flags:
 - `holeScope: 'group'` makes a hole cut only parts in its own group subtree. `cuttersFor(solid, holes, groups)` applies it.
 - `quiet` marks a helper cutter, drawn only while selected.
 
-Export and volume totals fuse the cut solids into one watertight solid (`fuseGeometries` in `csg.ts`); `split_for_print` builds pieces from copies plus scoped quiet cutters plus pegs ([ADR 0018](adr/0018-print-workflow-fuse-scope-split.md)).
+Export and volume totals fuse the cut solids into one watertight solid (`fuseGeometries` in `csg.ts`); `split_for_print` builds pieces from copies plus scoped quiet cutters plus pegs (ADR 0018).
 
 Two optional fields refine existing kinds: a box's `edgeRadius` (rounded edges and corners) and a cylinder's `radiusTop` (cone or frustum; 0 = pointed, either end may be 0). The meshes of the round and smooth kinds come from `src/model/shapes.ts`. They're closed solids with outward faces, which hole cutting and STL rely on.
 
 All kinds share `id`, `name`, `position` (world mm), `rotation` (Euler XYZ, degrees), `color`, `hole`, `visible`, and an optional `groupId`. World units: **mm, Z-up** (X red, Y green, Z blue).
 
-### Components and part properties ([ADR 0025](adr/0025-components-and-part-properties.md))
+### Components and part properties (ADR 0025)
 
 Entities with the same `component` id are linked copies: they share their definition (every field except name, position, rotation, visibility, group). `syncComponents` (`src/model/parts.ts`) makes the copies follow the one that changed; it runs after every API write and in `ModelDocument.commit`. Optional part properties (`material`, `finish`, `banding`, `partNo`, `note`) are part of the definition and feed the cut list, the booklet's part letters and GLB material names.
 
-### Groups ([ADR 0011](adr/0011-groups-as-flat-membership.md))
+### Groups (ADR 0011)
 
 `doc.groups` is a list of `{ id, name, parentId? }`, and an entity names its group with `groupId`. Groups have **no transform**; members keep world positions, so geometry, snapping, CSG and export are unaffected. Pure helpers live in `src/model/groups.ts`:
 - `groupMembers`, `groupChain` (nesting);
@@ -83,7 +83,7 @@ Entities with the same `component` id are linked copies: they share their defini
 
 Selection works SketchUp-style. A click selects the outermost group. `doc.openGroupId` is the group open for editing: clicks pick parts inside it, and the viewport fades everything else. It's UI state, not saved and not undoable.
 
-### Reference drawings ([ADR 0014](adr/0014-exchange-formats-and-reference-drawings.md))
+### Reference drawings (ADR 0014)
 
 Imported plans (DXF) to trace and snap to. They are **not part of the model**: no selection, CSG, cut list, volumes, print checks or export.
 - `doc.references` holds the metadata: `{ id, name, kind: 'drawing', units, position, rotation (about Z), visible, hiddenLayers }`. It's snapshotted, so changes are undoable.
@@ -91,13 +91,13 @@ Imported plans (DXF) to trace and snap to. They are **not part of the model**: n
 - `src/model/dxf.ts` parses ASCII DXF into that geometry. `src/model/references.ts` has the placement matrix (`referenceMatrix`: drawing units → mm, rotate, translate), bounds, snap points and file validation.
 - The viewport draws each drawing as one `LineSegments` (rebuilt only when layers change; placement is a matrix). The snapper adds its corners, segment midpoints and arc/circle centres.
 
-### Build instructions ([ADR 0021](adr/0021-build-instructions-booklet.md))
+### Build instructions (ADR 0021)
 
 Build instructions live in `doc.instructions`: only the title, intro, language and step order with texts. Letters, quantities and pictures are derived when the booklet opens (`src/model/instructions.ts`, `src/viewport/InstructionImages.ts`, `src/ui/InstructionsView.ts`).
 
-A project with several pieces of furniture has a booklet per top-level group ([ADR 0027](adr/0027-one-booklet-per-piece-of-furniture.md)), stored in `doc.instructions.groups[groupId]`. `instructionScope` picks the group's parts (plus all holes), `storedInstructions` the group's stored booklet (inheriting the project language) and `withInstructions` writes one back.
+A project with several pieces of furniture has a booklet per top-level group (ADR 0027), stored in `doc.instructions.groups[groupId]`. `instructionScope` picks the group's parts (plus all holes), `storedInstructions` the group's stored booklet (inheriting the project language) and `withInstructions` writes one back.
 
-### Annotations ([ADR 0015](adr/0015-annotations-notes-and-dimensions.md))
+### Annotations (ADR 0015)
 
 Notes and dimensions in `doc.annotations`. They're snapshotted (one undo step per change), saved in the file, never geometry.
 - An `Anchor` is `{ point }` or `{ entity, at }`, where `at` = fractions of the part's local box. `resolveAnchor` turns it into a world point through the part's current matrix, so anchors follow moves, rotations and resizes.
@@ -114,13 +114,13 @@ A display state in the viewport, never a model change: no transaction, no undo s
 - `Viewport.setExplode` applies the offsets as object matrices. Zoom-to-fit, renders and rectangle selection use the drawn positions; snapping and the model don't.
 - **Stands on the floor:** after spreading, everything is lifted so the lowest part sits at the model's original bottom.
 - **Presentation look:** the grid, axes, bed and scale figure live under one `stage` node, hidden while exploded together with reference drawings, on a studio-gradient background. Annotations are suppressed.
-- **Look-only** ([ADR 0019](adr/0019-exploded-view-look-only.md)):
+- **Look-only** (ADR 0019):
   - `App.uiCall` refuses write/history operations, and undo/redo are refused too; the Sidebar is `setLocked`;
   - editing tools, New, Open and Import reassemble first;
   - bridge (MCP) edits reassemble first through `BridgeClient.beforeRequest(operation)`.
 - API: `explode_view` (host) and `render_views { explode }`.
 
-### Document and transactions ([ADR 0002](adr/0002-document-transactions-snapshot-undo.md))
+### Document and transactions (ADR 0002)
 
 `ModelDocument` (`src/model/Document.ts`) owns `entities`, `groups`, `annotations`, `references` (+ their geometry), `selection`, `annotationSelection`, `openGroupId`, `units` and document settings (`workspace`, `printer`).
 
@@ -135,8 +135,8 @@ A display state in the viewport, never a model change: no transaction, no undo s
 
 `Viewport.sync()` rebuilds a mesh only when its entity changed. The cache key is the entity JSON plus the JSON of every hole overlapping it, so moving a hole re-cuts only the solids it touches. Per entity:
 
-- **Mesh:** `buildCutGeometry` in `csg.ts` makes the geometry, with holes subtracted ([ADR 0005](adr/0005-holes-as-csg-cutters.md)).
-  - It uses Manifold (`manifold.ts`: all holes in one exact, watertight batch) once `initManifold()` has loaded the WebAssembly, and three-bvh-csg before that, or if Manifold rejects an input ([ADR 0017](adr/0017-manifold-geometry-engine.md)).
+- **Mesh:** `buildCutGeometry` in `csg.ts` makes the geometry, with holes subtracted (ADR 0005).
+  - It uses Manifold (`manifold.ts`: all holes in one exact, watertight batch) once `initManifold()` has loaded the WebAssembly, and three-bvh-csg before that, or if Manifold rejects an input (ADR 0017).
   - When the engine becomes ready, `Viewport.rebuildAll()` re-cuts everything.
   - Manifold objects live in WebAssembly memory: free every one (`.delete()`); `manifold.ts` does it in `finally`.
 - **Edges:** `featureEdges` in `edges.ts` draws creases above 25° plus open boundaries, and drops seams that CSG leaves inside flat faces.
@@ -151,13 +151,13 @@ Scene helpers:
 
 ### Interaction
 
-- **Tools** ([ADR 0004](adr/0004-tools-edit-live-entities.md)): `src/tools/*`. Each tool is a small state machine (`idle → rect → height`, …). It receives pointer events, key presses and typed values from the measurement box. Drawing tools add a real entity at the first click and update it live, so the preview *is* the result.
+- **Tools** (ADR 0004): `src/tools/*`. Each tool is a small state machine (`idle → rect → height`, …). It receives pointer events, key presses and typed values from the measurement box. Drawing tools add a real entity at the first click and update it live, so the preview *is* the result.
 - **Snapper:** `src/viewport/Snapper.ts` turns a cursor position into a 3D point. Priority: snap points within 14 px (corners > centres > midpoints), then faces, then the ground; free positions are rounded to the snap step.
-- **Commands and keymap** ([ADR 0006](adr/0006-command-registry-and-keymap.md)): `commands.ts` lists every bindable action and `keymap.ts` maps keys to command ids. User overrides live in `localStorage`. `App.runCommand(id)` executes them, and the toolbar buttons go through the same function.
-- **Right-click menu** ([ADR 0012](adr/0012-context-menu-from-commands.md)): `src/ui/ContextMenu.ts`. A right-click without a drag opens it (a right-drag pans). Its items are commands, built in `App.menuItems`, so each shows its current shortcut.
+- **Commands and keymap** (ADR 0006): `commands.ts` lists every bindable action and `keymap.ts` maps keys to command ids. User overrides live in `localStorage`. `App.runCommand(id)` executes them, and the toolbar buttons go through the same function.
+- **Right-click menu** (ADR 0012): `src/ui/ContextMenu.ts`. A right-click without a drag opens it (a right-drag pans). Its items are commands, built in `App.menuItems`, so each shows its current shortcut.
 - **Hold-to-navigate:** holding the pan/orbit key gives the left mouse button to `OrbitControls` without switching tools, so an operation in progress survives. A quick tap of the same key is forwarded to the tool as a key press.
 
-### Workspaces ([ADR 0007](adr/0007-workspaces-are-configuration.md))
+### Workspaces (ADR 0007)
 
 `src/model/workspaces.ts` holds three configuration objects: units, snap step, grid base, home view, swatches, cylinder segments, sidebar panels, print plate on/off, scale figure on/off. It also holds the printer profiles and the pure functions `checkPrintFit`, `placeOnPlateDelta` and `meshVolume`. `App.applyWorkspace` pushes the configuration into the viewport, sidebar and settings.
 
@@ -167,7 +167,7 @@ Scene helpers:
 |---|---|---|
 | Model (autosave) | `localStorage` | `modeler.autosave.v1:<tab id>`, a `DocumentFile`, one per browser tab; index `modeler.tabs.v1` (`src/ui/TabSession.ts`, ADR 0023) |
 | Clipboard fallback | `localStorage` | `modeler.clipboard.v1`, the last copy (the system clipboard has it too) |
-| Project file | Save / Save As / Open / drag-drop: written back in place where the File System Access API exists, else downloaded ([ADR 0016](adr/0016-project-files-save-in-place.md)) | `*.modeler.json`: `{format: 'modeler', version: 1, units, workspace, printer, entities, groups, annotations?, references?}`; each reference carries its `geometry` |
+| Project file | Save / Save As / Open / drag-drop: written back in place where the File System Access API exists, else downloaded (ADR 0016) | `*.modeler.json`: `{format: 'modeler', version: 1, units, workspace, printer, entities, groups, annotations?, references?}`; each reference carries its `geometry` |
 | Reference drawing source | import / drag-drop | `*.dxf` (ASCII), converted on import; the DXF itself isn't kept |
 | App settings (snap per workspace, cut preview, filament) | `localStorage` | `modeler.settings.v1` |
 | Shortcut overrides, hold keys | `localStorage` | `modeler.keymap.v1` |
@@ -199,7 +199,7 @@ These must hold after every committed change. The Modeler API enforces them in `
 ## Module map
 
 ```
-mcp/                  MCP server (Node), bundled to mcp/dist by npm run build:mcp — see mcp/README.md
+mcp/                  MCP server (Node), bundled to mcp/dist by npm run build:mcp — see docs/mcp.md
   src/main.ts, server.ts, bridge.ts, files.ts
 src/
   main.ts             entry; creates App, exposes window.modeler (debug + smoke test)
