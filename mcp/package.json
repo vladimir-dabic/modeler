@@ -1,6 +1,6 @@
 {
   "name": "modeler-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Modeler, a prompt-first 3D modeler for makers: the web app plus an MCP server so Claude (or any MCP client) can model in it.",
   "type": "module",
   "bin": {
